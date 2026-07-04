@@ -1,0 +1,12 @@
+venv/
+venv311/
+__pycache__/
+*.mp3
+*.wav
+.git/
+*.zip
+*.pyc
+db.sqlite3
+*.mp3
+*.wav
+# *.onnx
