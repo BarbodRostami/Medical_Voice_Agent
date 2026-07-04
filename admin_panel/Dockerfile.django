@@ -1,0 +1,11 @@
+FROM python:3.10-slim
+WORKDIR /app
+# کپی کردن لیست نیازمندی‌ها از هر مسیری که هست
+COPY admin_panel/requirements_django.txt /app/requirements.txt
+#RUN pip install --no-cache-dir -r requirements_django.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+COPY . .
+# پورت پیش‌فرض جنگو
+EXPOSE 8000
+CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]

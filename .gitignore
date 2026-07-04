@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+venv311/ 
+
+# Databases
+*.sqlite3
+db.sqlite3
+
+# Models & Large Files
+*.onnx
+*.json
+*.mp3
+*.wav
+*.zip
+
+# OS files
+.DS_Store
+.env

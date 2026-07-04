@@ -1,0 +1,19 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+fastapi
+uvicorn
+langchain
+langchain-community
+langchain-chroma
+langchain-ollama
+sentence-transformers
+chromadb
+pydantic
+python-multipart
+langchain-huggingface
+transformers==4.44.0
+torch==2.2.1+cpu #--extra-index-url https://download.pytorch.org/whl/cpu
+numpy<2.0.0
+streamlit
+requests
+deep-translator
+piper-tts
