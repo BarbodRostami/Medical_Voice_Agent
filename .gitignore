@@ -6,7 +6,7 @@ venv/
 .venv/
 env/
 venv311/ 
-
+db/
 # Databases
 *.sqlite3
 db.sqlite3
