@@ -10,6 +10,8 @@ services:
       - "8000:8000"
     volumes:
       - ./db:/app/db
+    environment:
+      - OLLAMA_HOST=http://host.docker.internal:11434
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
