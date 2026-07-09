@@ -1,101 +1,104 @@
 import os
-import shutil
-import subprocess
-import tempfile
 from pathlib import Path
+
 import requests
 import streamlit as st
-from deep_translator import GoogleTranslator
+from medical_voice_utils import (
+    clean_persian_for_tts,
+    tts_to_mp3,
+    translate_to_persian,
+)
+
+# ─── Config ──────────────────────────────────────────────────────────────────
 
 APP_DIR = Path(__file__).resolve().parent
-PIPER_MODEL = APP_DIR / "fa_IR-amir-medium.onnx"
-translator_to_fa = GoogleTranslator(source="en", target="fa")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000/chat")
+BACKEND_STREAM_URL = os.getenv("BACKEND_STREAM_URL", "http://localhost:8000/chat/stream")
 
 
-def get_piper_executable() -> str | None:
-    piper = shutil.which("piper")
-    if piper:
-        return piper
-    venv_piper = APP_DIR / "venv311" / "Scripts" / "piper.exe"
-    if venv_piper.exists():
-        return str(venv_piper)
-    return None
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_translate(text: str) -> str:
+    return translate_to_persian(text)
 
 
-def translate_to_persian(text: str) -> str:
+@st.cache_data(ttl=3600, show_spinner=False)
+def generate_audio(persian_text: str) -> bytes | None:
+    """Generate MP3 from Persian text, cached per unique text."""
+    clean = clean_persian_for_tts(persian_text)
+    if not clean:
+        return None
     try:
-        return translator_to_fa.translate(text)
+        return tts_to_mp3(clean, timeout=30)
+    except Exception as e:
+        print(f"TTS error: {e}")
+        return None
+
+
+# ─── Streaming ────────────────────────────────────────────────────────────────
+
+def stream_from_backend(query: str):
+    """Generator that yields text tokens from the streaming backend endpoint."""
+    try:
+        with requests.post(
+            BACKEND_STREAM_URL,
+            json={"query": query},
+            stream=True,
+            timeout=180,
+        ) as resp:
+            if resp.status_code != 200:
+                yield f"Error {resp.status_code}: Could not get a response from the backend."
+                return
+            for chunk in resp.iter_content(chunk_size=None, decode_unicode=True):
+                if chunk:
+                    yield chunk
+    except Exception as e:
+        yield f"\nConnection error: {e}"
+
+
+def get_source_count(query: str) -> int:
+    """Fetch source document count (cache hit — instant after streaming)."""
+    try:
+        resp = requests.post(BACKEND_URL, json={"query": query}, timeout=10)
+        if resp.status_code == 200:
+            return resp.json().get("source_documents_count", 0)
     except Exception:
-        return text
+        pass
+    return 0
 
 
-def speak_farsi_to_wav(text: str) -> bytes | None:
-    piper_exe = get_piper_executable()
-    if not piper_exe or not PIPER_MODEL.exists():
-        return None
+# ─── Page Layout ──────────────────────────────────────────────────────────────
 
-    clean_text = text.replace('"', "").replace("'", "").replace("\n", " ").strip()
-    if not clean_text:
-        return None
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        txt_path = Path(tmpdir) / "input.txt"
-        wav_path = Path(tmpdir) / "output.wav"
-        txt_path.write_text(clean_text, encoding="utf-8")
-
-        result = subprocess.run(
-            [
-                piper_exe,
-                "--model",
-                str(PIPER_MODEL),
-                "--input_file",
-                str(txt_path),
-                "--output_file",
-                str(wav_path),
-                "--length_scale",
-                "1.1",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0 or not wav_path.exists():
-            return None
-        return wav_path.read_bytes()
-
-
-def render_voice_output(answer: str) -> tuple[str | None, bytes | None]:
-    persian_answer = translate_to_persian(answer)
-    audio_bytes = speak_farsi_to_wav(persian_answer)
-    return persian_answer, audio_bytes
-
-
-# تنظیمات ظاهری صفحه
 st.set_page_config(
     page_title="Medical RAG Assistant",
     page_icon="🩺",
     layout="centered",
 )
 
-# هدر برنامه
 st.markdown(
-    "<h1 style='text-align: center; color: #008080;'>🩺 Medical RAG AI Assistant</h1>",
+    "<h1 style='text-align:center;color:#008080;'>🩺 Medical RAG AI Assistant</h1>",
     unsafe_allow_html=True,
 )
 st.markdown(
-    "<p style='text-align: center;'>Ask clinical or medical questions based on your loaded knowledge base.</p>",
+    "<p style='text-align:center;color:#555;'>"
+    "Ask clinical or medical questions based on your loaded knowledge base."
+    "</p>",
     unsafe_allow_html=True,
 )
 st.write("---")
 
-# آدرس API بک‌اند (اگر در داکر کامپوز باشد از نام سرویس و در غیر این صورت از localhost استفاده می‌کند)
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000/chat")
-enable_voice = st.sidebar.toggle("🔊 خروجی صوتی فارسی", value=True)
+# ─── Sidebar ─────────────────────────────────────────────────────────────────
 
-# مقداردهی اولیه به تاریخچه چت در Session State
+with st.sidebar:
+    st.header("تنظیمات")
+    enable_voice = st.toggle("🔊 خروجی صوتی فارسی", value=True)
+    st.caption("صدا: fa-IR-DilaraNeural")
+    st.caption("ترجمه: Google Translate")
+
+# ─── Chat History ─────────────────────────────────────────────────────────────
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# نمایش پیام‌های قبلی چت
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
@@ -104,59 +107,57 @@ for message in st.session_state.messages:
                 with st.expander("🇮🇷 متن فارسی"):
                     st.markdown(persian_text)
             if audio_bytes := message.get("audio"):
-                st.audio(audio_bytes, format="audio/wav")
-        if "sources" in message and message["sources"] > 0:
-            st.caption(f"📚 Calculated using {message['sources']} source documents.")
+                st.audio(audio_bytes, format="audio/mp3")
+            if sources := message.get("sources", 0):
+                st.caption(f"📚 Based on {sources} source document(s).")
 
-# دریافت سوال جدید از کاربر
+# ─── New Message ──────────────────────────────────────────────────────────────
+
 if prompt := st.chat_input("How can I help you with your clinical query?"):
     with st.chat_message("user"):
         st.markdown(prompt)
-
     st.session_state.messages.append({"role": "user", "content": prompt})
 
     with st.chat_message("assistant"):
-        with st.spinner("Analyzing medical documents and generating response..."):
-            try:
-                response = requests.post(BACKEND_URL, json={"query": prompt}, timeout=400)
+        # Phase 1: Stream the answer token by token
+        full_answer: str = st.write_stream(stream_from_backend(prompt))
 
-                if response.status_code == 200:
-                    data = response.json()
-                    answer = data.get("answer", "No response generated.")
-                    sources_count = data.get("source_documents_count", 0)
+        # Phase 2: Fetch source count (cache hit — instant)
+        sources_count = get_source_count(prompt)
 
-                    st.markdown(answer)
+        persian_answer: str | None = None
+        audio_bytes: bytes | None = None
 
-                    persian_answer = None
-                    audio_bytes = None
-                    if enable_voice:
-                        with st.spinner("در حال تولید صدای فارسی..."):
-                            persian_answer, audio_bytes = render_voice_output(answer)
-                        if persian_answer:
-                            with st.expander("🇮🇷 متن فارسی"):
-                                st.markdown(persian_answer)
-                        if audio_bytes:
-                            st.audio(audio_bytes, format="audio/wav")
-                        elif enable_voice:
-                            st.caption("🔇 خروجی صوتی در دسترس نیست. Piper یا مدل فارسی را بررسی کنید.")
+        # Phase 3: Translate + TTS (runs after streaming so user already has text)
+        if enable_voice and full_answer:
+            with st.spinner("در حال ترجمه و تولید صدای فارسی..."):
+                # translate_to_persian already handles abbreviation replacement internally
+                persian_answer = cached_translate(full_answer)
+                audio_bytes = generate_audio(persian_answer)
 
-                    if sources_count > 0:
-                        with st.expander("📚 Reference Information"):
-                            st.write(
-                                f"This response was cross-referenced with **{sources_count}** "
-                                "medical documents extracted from your vector database."
-                            )
+            if persian_answer:
+                with st.expander("🇮🇷 متن فارسی"):
+                    st.markdown(persian_answer)
 
-                    st.session_state.messages.append(
-                        {
-                            "role": "assistant",
-                            "content": answer,
-                            "sources": sources_count,
-                            "persian_answer": persian_answer,
-                            "audio": audio_bytes,
-                        }
-                    )
-                else:
-                    st.error("⚠️ Error: Backend API returned an unsuccessful status code.")
-            except Exception as e:
-                st.error(f"⚠️ Connection Error: Could not connect to the medical backend. Details: {e}")
+            if audio_bytes:
+                st.audio(audio_bytes, format="audio/mp3")
+            else:
+                st.caption("🔇 خروجی صوتی در دسترس نیست (edge-tts را بررسی کنید).")
+
+        if sources_count > 0:
+            with st.expander("📚 Reference Information"):
+                st.write(
+                    f"This response was cross-referenced with **{sources_count}** "
+                    "medical document(s) from your vector database."
+                )
+
+        # Save to session history
+        st.session_state.messages.append(
+            {
+                "role": "assistant",
+                "content": full_answer,
+                "sources": sources_count,
+                "persian_answer": persian_answer,
+                "audio": audio_bytes,
+            }
+        )
