@@ -1,19 +1,33 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
+
+# API framework
 fastapi
-uvicorn
+uvicorn[standard]
+python-multipart
+python-dotenv
+
+# LangChain ecosystem
 langchain
 langchain-community
 langchain-chroma
-langchain-ollama
-sentence-transformers
-chromadb
-pydantic
-python-multipart
 langchain-huggingface
+
+# Vector store & retrieval
+chromadb
+rank-bm25==0.2.2
+
+# Embeddings / ML
+sentence-transformers
 transformers==4.44.0
-torch==2.2.1+cpu #--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.1+cpu
 numpy<2.0.0
-streamlit
+
+# LLM client
 requests
-deep-translator
-piper-tts
+
+# Translation & TTS
+deep-translator==1.11.4
+edge-tts==7.2.8
+
+# Object storage (Parmin Cloud / S3-compatible)
+boto3==1.43.40

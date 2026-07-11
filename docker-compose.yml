@@ -1,7 +1,21 @@
 version: '3.8'
 
 services:
-  # سرویس بک‌ند (FastAPI)
+
+  # ─── Ollama (Local LLM Server) ───────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - medical_rag_network
+    restart: unless-stopped
+    # Pull the medical model on first start
+    entrypoint: ["/bin/sh", "-c", "ollama serve & sleep 5 && ollama pull biomistral && wait"]
+
+  # ─── Backend (FastAPI + RAG) ──────────────────────────────────────────────────
   backend:
     build:
       context: .
@@ -10,30 +24,34 @@ services:
       - "8000:8000"
     volumes:
       - ./db:/app/db
+    env_file:
+      - .env
     environment:
-      - OLLAMA_HOST=http://host.docker.internal:11434
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - OLLAMA_HOST=http://ollama:11434
     networks:
       - medical_rag_network
-    restart: always
+    depends_on:
+      - ollama
+    restart: unless-stopped
 
-  # سرویس رابط کاربری (Streamlit)
+  # ─── Frontend (Streamlit UI) ──────────────────────────────────────────────────
   frontend:
     build:
       context: .
       dockerfile: Dockerfile.ui
     ports:
       - "8501:8501"
+    env_file:
+      - .env
     environment:
-      - BACKEND_URL=http://backend:8000/chat
+      - BACKEND_URL=http://backend:8000
     networks:
       - medical_rag_network
     depends_on:
       - backend
-    restart: always
+    restart: unless-stopped
 
-  # سرویس پنل ادمین (Django)
+  # ─── Admin Panel (Django) ─────────────────────────────────────────────────────
   django-admin:
     build:
       context: .
@@ -42,12 +60,17 @@ services:
       - "8001:8000"
     volumes:
       - .:/app
+    env_file:
+      - .env
     networks:
       - medical_rag_network
     depends_on:
       - backend
-    restart: always
+    restart: unless-stopped
 
 networks:
   medical_rag_network:
     driver: bridge
+
+volumes:
+  ollama_data:
