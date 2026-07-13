@@ -9,9 +9,11 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Literal
 from urllib.parse import urlparse
 
+import tempfile
+
 import requests
 import uvicorn
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from langchain_chroma import Chroma
 from langchain_community.llms import Ollama as OllamaLLM
@@ -61,6 +63,20 @@ JobStatus = Literal["queued", "processing", "done", "failed"]
 
 _jobs: dict[str, dict] = {}
 _job_executor = ThreadPoolExecutor(max_workers=5)
+
+# Whisper model — loaded once on first STT request (lazy, ~150MB for "tiny")
+_whisper_model = None
+_WHISPER_MODEL_SIZE = "small"  # tiny=75MB / small=244MB / medium=769MB
+
+
+def _get_whisper() -> "WhisperModel":
+    global _whisper_model
+    if _whisper_model is None:
+        from faster_whisper import WhisperModel
+        print(f"Loading Whisper model '{_WHISPER_MODEL_SIZE}'...")
+        _whisper_model = WhisperModel(_WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
+        print("Whisper ready.")
+    return _whisper_model
 
 
 def _new_job() -> str:
@@ -520,6 +536,72 @@ def _worker_chat_voice(job_id: str, query: str, base_url: str) -> None:
         _update_job(job_id, status="failed", message="خطا در پردازش.", error=str(e))
 
 
+def _worker_voice_input(job_id: str, audio_path: str, base_url: str) -> None:
+    """Background worker: audio file → Whisper STT → RAG → TTS → S3."""
+    try:
+        # Step 1: Speech-to-Text
+        _update_job(job_id, status="processing", message="در حال تبدیل صدا به متن...")
+        whisper = _get_whisper()
+        segments, info = whisper.transcribe(audio_path, beam_size=5)
+        query = " ".join(seg.text for seg in segments).strip()
+        detected_lang = info.language
+        print(f"STT result (lang={detected_lang}): {query[:80]}")
+
+        if not query:
+            _update_job(job_id, status="failed", message="صدایی شناسایی نشد.", error="Empty transcription")
+            return
+
+        # Step 2: RAG (same as _worker_chat_voice)
+        _update_job(job_id, message="در حال جستجو در پایگاه دانش...", answer=None)
+        key = _cache_key(query)
+        cached = _get_cache(key)
+        if cached:
+            answer = cached["answer"]
+        else:
+            docs = _retrieve(query)
+            context = "\n\n---\n\n".join([doc.page_content for doc in docs])
+            prompt = _build_rag_prompt(query, context)
+            _update_job(job_id, message="در حال تولید پاسخ با هوش مصنوعی...")
+            raw = llm.invoke(prompt)
+            answer = _clean_llm_output(raw, query)
+            _set_cache(key, answer, len(docs))
+            _save_to_django(query, answer)
+
+        # Step 3: TTS
+        _update_job(job_id, message="در حال تبدیل متن به صدا...")
+        audio_bytes = english_to_persian_voice(answer)
+
+        # Step 4: Upload
+        _update_job(job_id, message="در حال آپلود فایل صوتی...")
+        try:
+            _up = ThreadPoolExecutor(max_workers=1)
+            fut = _up.submit(upload_mp3_to_liara, audio_bytes)
+            _up.shutdown(wait=False)
+            file_key = fut.result(timeout=45)
+            audio_url = base_url + f"voice/audio/{file_key}"
+        except Exception:
+            audio_url = None
+
+        _update_job(
+            job_id,
+            status="done",
+            message="تکمیل شد.",
+            transcription=query,
+            answer=answer,
+            audio_url=audio_url,
+        )
+
+    except Exception as e:
+        _update_job(job_id, status="failed", message="خطا در پردازش.", error=str(e))
+    finally:
+        # Clean up temp file
+        try:
+            import os as _os
+            _os.remove(audio_path)
+        except Exception:
+            pass
+
+
 def _worker_voice(job_id: str, full_text: str, base_url: str) -> None:
     """Background worker for /jobs/voice-report: TTS only → S3 upload."""
     try:
@@ -602,6 +684,35 @@ async def job_voice_report(req: Request):
         "job_id": job_id,
         "status": "queued",
         "message": "در صف انتظار — برای بررسی وضعیت از GET /jobs/{job_id} استفاده کنید.",
+    }
+
+
+@app.post(
+    "/stt/ask",
+    summary="Async voice input → RAG answer → MP3",
+    response_description="Returns job_id immediately; poll /jobs/{job_id} for status + audio_url",
+)
+async def job_voice_input(req: Request, file: UploadFile = File(...)):
+    """
+    Upload an audio file (MP3/WAV/OGG/M4A). Whisper transcribes it locally,
+    then the text goes through RAG + TTS. Poll /jobs/{job_id} for the result.
+    """
+    if db is None or llm is None:
+        raise HTTPException(status_code=500, detail="System not initialized.")
+
+    # Save upload to a temp file (worker reads from disk)
+    suffix = "." + (file.filename.rsplit(".", 1)[-1] if file.filename and "." in file.filename else "wav")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(await file.read())
+        tmp_path = tmp.name
+
+    job_id = _new_job()
+    base_url = str(req.base_url)
+    _job_executor.submit(_worker_voice_input, job_id, tmp_path, base_url)
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "message": "فایل صوتی دریافت شد — برای بررسی وضعیت از GET /jobs/{job_id} استفاده کنید.",
     }
 
 

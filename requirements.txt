@@ -31,3 +31,6 @@ edge-tts==7.2.8
 
 # Object storage (Parmin Cloud / S3-compatible)
 boto3==1.43.40
+
+# Speech-to-Text (Whisper — local, no API key needed)
+faster-whisper
