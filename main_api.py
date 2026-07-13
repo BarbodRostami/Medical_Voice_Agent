@@ -497,10 +497,13 @@ def _worker_chat_voice(job_id: str, query: str, base_url: str) -> None:
         _update_job(job_id, message="در حال تبدیل متن به صدا...")
         audio_bytes = english_to_persian_voice(answer)
 
-        # Step 3: Upload
+        # Step 3: Upload (hard 45s deadline — executor.shutdown(wait=False) avoids blocking)
         _update_job(job_id, message="در حال آپلود فایل صوتی...")
         try:
-            file_key = upload_mp3_to_liara(audio_bytes)
+            _up = ThreadPoolExecutor(max_workers=1)
+            fut = _up.submit(upload_mp3_to_liara, audio_bytes)
+            _up.shutdown(wait=False)
+            file_key = fut.result(timeout=45)
             audio_url = base_url + f"voice/audio/{file_key}"
         except Exception:
             audio_url = None
@@ -525,7 +528,10 @@ def _worker_voice(job_id: str, full_text: str, base_url: str) -> None:
 
         _update_job(job_id, message="در حال آپلود فایل صوتی...")
         try:
-            file_key = upload_mp3_to_liara(audio_bytes)
+            _up = ThreadPoolExecutor(max_workers=1)
+            fut = _up.submit(upload_mp3_to_liara, audio_bytes)
+            _up.shutdown(wait=False)
+            file_key = fut.result(timeout=45)
             audio_url = base_url + f"voice/audio/{file_key}"
         except Exception:
             audio_url = None
