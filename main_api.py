@@ -26,6 +26,7 @@ from medical_voice_utils import (
     download_mp3_from_storage,
     english_to_persian_voice,
     persian_to_voice,
+    translate_to_english,
     upload_mp3_to_liara,
 )
 
@@ -539,19 +540,23 @@ def _worker_chat_voice(job_id: str, query: str, base_url: str) -> None:
 def _worker_voice_input(job_id: str, audio_path: str, base_url: str) -> None:
     """Background worker: audio file → Whisper STT → RAG → TTS → S3."""
     try:
-        # Step 1: Speech-to-Text
+        # Step 1: Speech-to-Text (force Persian; falls back to auto-detect if empty)
         _update_job(job_id, status="processing", message="در حال تبدیل صدا به متن...")
         whisper = _get_whisper()
-        segments, info = whisper.transcribe(audio_path, beam_size=5)
-        query = " ".join(seg.text for seg in segments).strip()
-        detected_lang = info.language
-        print(f"STT result (lang={detected_lang}): {query[:80]}")
+        segments, info = whisper.transcribe(audio_path, beam_size=5, language="fa")
+        persian_query = " ".join(seg.text for seg in segments).strip()
+        print(f"STT (fa): {persian_query[:80]}")
 
-        if not query:
+        if not persian_query:
             _update_job(job_id, status="failed", message="صدایی شناسایی نشد.", error="Empty transcription")
             return
 
-        # Step 2: RAG (same as _worker_chat_voice)
+        # Step 2: Translate Persian question → English for RAG
+        _update_job(job_id, message="در حال ترجمه سوال...")
+        query = translate_to_english(persian_query)
+        print(f"Translated query (en): {query[:80]}")
+
+        # Step 3: RAG
         _update_job(job_id, message="در حال جستجو در پایگاه دانش...", answer=None)
         key = _cache_key(query)
         cached = _get_cache(key)
@@ -567,8 +572,10 @@ def _worker_voice_input(job_id: str, audio_path: str, base_url: str) -> None:
             _set_cache(key, answer, len(docs))
             _save_to_django(query, answer)
 
-        # Step 3: TTS
+        # Step 3: TTS (english_to_persian_voice translates + speaks; keep Persian text too)
         _update_job(job_id, message="در حال تبدیل متن به صدا...")
+        from medical_voice_utils import translate_to_persian as _t2fa
+        persian_answer = _t2fa(answer)
         audio_bytes = english_to_persian_voice(answer)
 
         # Step 4: Upload
@@ -586,8 +593,8 @@ def _worker_voice_input(job_id: str, audio_path: str, base_url: str) -> None:
             job_id,
             status="done",
             message="تکمیل شد.",
-            transcription=query,
-            answer=answer,
+            transcription=persian_query,
+            answer=persian_answer,
             audio_url=audio_url,
         )
 
