@@ -3,12 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import uuid
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from typing import Literal
 from urllib.parse import urlparse
 
 import requests
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from langchain_chroma import Chroma
 from langchain_community.llms import Ollama as OllamaLLM
@@ -49,6 +52,33 @@ OLLAMA_HOST = _normalize_ollama_host(os.getenv("OLLAMA_HOST"))
 MAX_CACHE_SIZE = 100
 
 _cache: OrderedDict[str, dict] = OrderedDict()
+
+# ─── Job Manager ──────────────────────────────────────────────────────────────
+# In-memory store: job_id → job state. Resets on server restart.
+# For production use Redis instead.
+
+JobStatus = Literal["queued", "processing", "done", "failed"]
+
+_jobs: dict[str, dict] = {}
+_job_executor = ThreadPoolExecutor(max_workers=5)
+
+
+def _new_job() -> str:
+    job_id = str(uuid.uuid4())
+    _jobs[job_id] = {
+        "status": "queued",
+        "message": "در صف انتظار...",
+        "audio_url": None,
+        "answer": None,
+        "error": None,
+    }
+    return job_id
+
+
+def _update_job(job_id: str, **kwargs) -> None:
+    if job_id in _jobs:
+        _jobs[job_id].update(kwargs)
+
 
 db = None
 llm = None
@@ -439,6 +469,154 @@ async def chat_voice(request: QuestionRequest):
             media_type="audio/mp3",
             headers={"Content-Disposition": "inline; filename=answer.mp3"},
         )
+
+
+# ─── Job Workers (run in background thread) ───────────────────────────────────
+
+def _worker_chat_voice(job_id: str, query: str, base_url: str) -> None:
+    """Background worker: RAG → TTS → S3 upload. Updates job state throughout."""
+    try:
+        _update_job(job_id, status="processing", message="در حال جستجو در پایگاه دانش...")
+
+        # Step 1: RAG
+        key = _cache_key(query)
+        cached = _get_cache(key)
+        if cached:
+            answer = cached["answer"]
+        else:
+            docs = _retrieve(query)
+            context = "\n\n---\n\n".join([doc.page_content for doc in docs])
+            prompt = _build_rag_prompt(query, context)
+            _update_job(job_id, message="در حال تولید پاسخ با هوش مصنوعی...")
+            raw = llm.invoke(prompt)
+            answer = _clean_llm_output(raw, query)
+            _set_cache(key, answer, len(docs))
+            _save_to_django(query, answer)
+
+        # Step 2: TTS
+        _update_job(job_id, message="در حال تبدیل متن به صدا...")
+        audio_bytes = english_to_persian_voice(answer)
+
+        # Step 3: Upload
+        _update_job(job_id, message="در حال آپلود فایل صوتی...")
+        try:
+            file_key = upload_mp3_to_liara(audio_bytes)
+            audio_url = base_url + f"voice/audio/{file_key}"
+        except Exception:
+            audio_url = None
+
+        _update_job(
+            job_id,
+            status="done",
+            message="تکمیل شد.",
+            answer=answer,
+            audio_url=audio_url,
+        )
+
+    except Exception as e:
+        _update_job(job_id, status="failed", message="خطا در پردازش.", error=str(e))
+
+
+def _worker_voice(job_id: str, full_text: str, base_url: str) -> None:
+    """Background worker for /jobs/voice-report: TTS only → S3 upload."""
+    try:
+        _update_job(job_id, status="processing", message="در حال تبدیل متن به صدا...")
+        audio_bytes = persian_to_voice(full_text)
+
+        _update_job(job_id, message="در حال آپلود فایل صوتی...")
+        try:
+            file_key = upload_mp3_to_liara(audio_bytes)
+            audio_url = base_url + f"voice/audio/{file_key}"
+        except Exception:
+            audio_url = None
+
+        _update_job(job_id, status="done", message="تکمیل شد.", audio_url=audio_url)
+
+    except Exception as e:
+        _update_job(job_id, status="failed", message="خطا در پردازش.", error=str(e))
+
+
+# ─── Job Endpoints ────────────────────────────────────────────────────────────
+
+@app.post(
+    "/jobs/chat",
+    summary="Async chat → voice job",
+    response_description="Returns job_id immediately; poll /jobs/{job_id} for status",
+)
+async def job_chat_voice(request: QuestionRequest, req: Request):
+    """
+    Submit a medical question. Processing (RAG + TTS + upload) runs in background.
+    Returns a job_id to poll with GET /jobs/{job_id}.
+    """
+    if db is None or llm is None:
+        raise HTTPException(status_code=500, detail="System not initialized.")
+    job_id = _new_job()
+    base_url = str(req.base_url)
+    _job_executor.submit(_worker_chat_voice, job_id, request.query, base_url)
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "message": "در صف انتظار — برای بررسی وضعیت از GET /jobs/{job_id} استفاده کنید.",
+    }
+
+
+@app.post(
+    "/jobs/voice-report",
+    summary="Async Persian medical report → voice job",
+    response_description="Returns job_id immediately",
+)
+async def job_voice_report(req: Request):
+    """
+    Submit a Persian medical report dict { uuid: {tafsir, recom} }.
+    TTS + upload runs in background. Poll /jobs/{job_id} for audio_url.
+    """
+    try:
+        body: dict = await req.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
+
+    first_value = next(iter(body.values()))
+    data = first_value if isinstance(first_value, dict) else body
+    tafsir = data.get("tafsir", "").strip()
+    recom = data.get("recom", "").strip()
+    if not tafsir and not recom:
+        raise HTTPException(status_code=400, detail="Provide at least 'tafsir' or 'recom'.")
+
+    parts = []
+    if tafsir:
+        parts.append(f"تفسیر بالینی. {tafsir}")
+    if recom:
+        parts.append(f"توصیه‌های درمانی. {recom}")
+    full_text = "  ".join(parts)
+
+    job_id = _new_job()
+    base_url = str(req.base_url)
+    _job_executor.submit(_worker_voice, job_id, full_text, base_url)
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "message": "در صف انتظار — برای بررسی وضعیت از GET /jobs/{job_id} استفاده کنید.",
+    }
+
+
+@app.get(
+    "/jobs/{job_id}",
+    summary="Check job status",
+)
+async def get_job_status(job_id: str):
+    """
+    Poll this endpoint to check if your voice job is ready.
+    status: queued | processing | done | failed
+    """
+    job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return {"job_id": job_id, **job}
+
+
+@app.get("/jobs", summary="List all jobs (debug)")
+async def list_jobs():
+    return {"total": len(_jobs), "jobs": _jobs}
 
 
 @app.get(
