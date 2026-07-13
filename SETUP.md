@@ -72,7 +72,51 @@ docker compose logs -f backend
 
 ---
 
-## ۶. متوقف کردن پروژه
+## ۷. API برای همکار فرانت‌اند
+
+مستندات تعاملی: **http://SERVER_IP:8000/docs**
+
+### جریان async (پیشنهادی)
+
+```bash
+# ۱) ارسال درخواست — فوری job_id برمی‌گردد
+POST /jobs/voice-report
+Content-Type: application/json
+{"uuid": {"tafsir": "...", "recom": "..."}}
+
+POST /jobs/chat
+{"query": "What is the normal ETCO2 range?"}
+
+POST /stt/ask
+Content-Type: multipart/form-data
+file: (فایل صوتی MP3/WAV — فارسی)
+
+# ۲) بررسی وضعیت — هر ۳-۵ ثانیه
+GET /jobs/{job_id}
+
+# ۳) وقتی status=done شد
+# audio_url → لینک پخش MP3
+# answer → پاسخ فارسی
+```
+
+### روی سرور Linux
+
+در `docker-compose.yml` مقدار `OLLAMA_HOST` را عوض کنید:
+
+```yaml
+- OLLAMA_HOST=http://172.17.0.1:11434
+```
+
+سپس:
+
+```bash
+sudo docker compose pull
+sudo docker compose up -d --build backend
+```
+
+---
+
+## ۸. متوقف کردن پروژه
 
 ```bash
 # متوقف کردن (بدون حذف داده‌ها)

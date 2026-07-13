@@ -27,6 +27,7 @@ from medical_voice_utils import (
     english_to_persian_voice,
     persian_to_voice,
     translate_to_english,
+    translate_to_persian,
     upload_mp3_to_liara,
 )
 
@@ -67,7 +68,7 @@ _job_executor = ThreadPoolExecutor(max_workers=5)
 
 # Whisper model — loaded once on first STT request (lazy, ~150MB for "tiny")
 _whisper_model = None
-_WHISPER_MODEL_SIZE = "small"  # tiny=75MB / small=244MB / medium=769MB
+_WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small")  # tiny / small / medium
 
 
 def _get_whisper() -> "WhisperModel":
@@ -490,6 +491,13 @@ async def chat_voice(request: QuestionRequest):
 
 # ─── Job Workers (run in background thread) ───────────────────────────────────
 
+def _answer_to_persian_voice(answer_en: str) -> tuple[str, bytes]:
+    """Translate English RAG answer to Persian and generate MP3."""
+    persian = translate_to_persian(answer_en)
+    audio_bytes = persian_to_voice(persian)
+    return persian, audio_bytes
+
+
 def _worker_chat_voice(job_id: str, query: str, base_url: str) -> None:
     """Background worker: RAG → TTS → S3 upload. Updates job state throughout."""
     try:
@@ -510,9 +518,9 @@ def _worker_chat_voice(job_id: str, query: str, base_url: str) -> None:
             _set_cache(key, answer, len(docs))
             _save_to_django(query, answer)
 
-        # Step 2: TTS
+        # Step 2: TTS (Persian answer for API + audio)
         _update_job(job_id, message="در حال تبدیل متن به صدا...")
-        audio_bytes = english_to_persian_voice(answer)
+        persian_answer, audio_bytes = _answer_to_persian_voice(answer)
 
         # Step 3: Upload (hard 45s deadline — executor.shutdown(wait=False) avoids blocking)
         _update_job(job_id, message="در حال آپلود فایل صوتی...")
@@ -529,7 +537,8 @@ def _worker_chat_voice(job_id: str, query: str, base_url: str) -> None:
             job_id,
             status="done",
             message="تکمیل شد.",
-            answer=answer,
+            answer=persian_answer,
+            answer_en=answer,
             audio_url=audio_url,
         )
 
@@ -572,13 +581,11 @@ def _worker_voice_input(job_id: str, audio_path: str, base_url: str) -> None:
             _set_cache(key, answer, len(docs))
             _save_to_django(query, answer)
 
-        # Step 3: TTS (english_to_persian_voice translates + speaks; keep Persian text too)
+        # Step 4: TTS (Persian answer + audio)
         _update_job(job_id, message="در حال تبدیل متن به صدا...")
-        from medical_voice_utils import translate_to_persian as _t2fa
-        persian_answer = _t2fa(answer)
-        audio_bytes = english_to_persian_voice(answer)
+        persian_answer, audio_bytes = _answer_to_persian_voice(answer)
 
-        # Step 4: Upload
+        # Step 5: Upload
         _update_job(job_id, message="در حال آپلود فایل صوتی...")
         try:
             _up = ThreadPoolExecutor(max_workers=1)
@@ -594,7 +601,9 @@ def _worker_voice_input(job_id: str, audio_path: str, base_url: str) -> None:
             status="done",
             message="تکمیل شد.",
             transcription=persian_query,
+            query_en=query,
             answer=persian_answer,
+            answer_en=answer,
             audio_url=audio_url,
         )
 
