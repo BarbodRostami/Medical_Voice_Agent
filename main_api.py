@@ -30,6 +30,7 @@ from medical_voice_utils import (
     translate_to_persian,
     upload_mp3_to_liara,
 )
+from stt_utils import detect_audio_extension, transcribe_medical_speech
 
 app = FastAPI(title="Medical RAG API")
 
@@ -493,7 +494,11 @@ async def chat_voice(request: QuestionRequest):
 
 def _answer_to_persian_voice(answer_en: str) -> tuple[str, bytes]:
     """Translate English RAG answer to Persian and generate MP3."""
+    if not answer_en or len(answer_en.strip()) < 3:
+        raise ValueError("پاسخ خالی است")
     persian = translate_to_persian(answer_en)
+    if not persian or len(persian.strip()) < 3:
+        raise ValueError("ترجمه فارسی ناموفق بود")
     audio_bytes = persian_to_voice(persian)
     return persian, audio_bytes
 
@@ -549,12 +554,10 @@ def _worker_chat_voice(job_id: str, query: str, base_url: str) -> None:
 def _worker_voice_input(job_id: str, audio_path: str, base_url: str) -> None:
     """Background worker: audio file → Whisper STT → RAG → TTS → S3."""
     try:
-        # Step 1: Speech-to-Text (force Persian; falls back to auto-detect if empty)
+        # Step 1: Speech-to-Text (ffmpeg normalize + Whisper with medical prompt)
         _update_job(job_id, status="processing", message="در حال تبدیل صدا به متن...")
         whisper = _get_whisper()
-        segments, info = whisper.transcribe(audio_path, beam_size=5, language="fa")
-        persian_query = " ".join(seg.text for seg in segments).strip()
-        print(f"STT (fa): {persian_query[:80]}")
+        persian_query = transcribe_medical_speech(whisper, audio_path)
 
         if not persian_query:
             _update_job(job_id, status="failed", message="صدایی شناسایی نشد.", error="Empty transcription")
@@ -580,6 +583,17 @@ def _worker_voice_input(job_id: str, audio_path: str, base_url: str) -> None:
             answer = _clean_llm_output(raw, query)
             _set_cache(key, answer, len(docs))
             _save_to_django(query, answer)
+
+        if not answer or len(answer.strip()) < 5:
+            _update_job(
+                job_id,
+                status="failed",
+                message="پاسخی تولید نشد — سوال را واضح‌تر و به فارسی بپرسید.",
+                transcription=persian_query,
+                query_en=query,
+                error="LLM returned empty or too-short answer",
+            )
+            return
 
         # Step 4: TTS (Persian answer + audio)
         _update_job(job_id, message="در حال تبدیل متن به صدا...")
@@ -716,10 +730,10 @@ async def job_voice_input(req: Request, file: UploadFile = File(...)):
     if db is None or llm is None:
         raise HTTPException(status_code=500, detail="System not initialized.")
 
-    # Save upload to a temp file (worker reads from disk)
-    suffix = "." + (file.filename.rsplit(".", 1)[-1] if file.filename and "." in file.filename else "wav")
+    raw = await file.read()
+    suffix = detect_audio_extension(raw, file.filename, file.content_type)
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(await file.read())
+        tmp.write(raw)
         tmp_path = tmp.name
 
     job_id = _new_job()

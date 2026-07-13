@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main_api.py medical_voice_utils.py ingestion.py ./
+COPY main_api.py medical_voice_utils.py stt_utils.py ingestion.py ./
 
 # ChromaDB persisted volume mounted at runtime (see docker-compose.yml)
 VOLUME ["/app/db"]
