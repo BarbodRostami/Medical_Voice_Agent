@@ -132,6 +132,16 @@ def clean_persian_for_tts(text: str) -> str:
 
 # ─── Translation ─────────────────────────────────────────────────────────────
 
+def translate_to_english(text: str) -> str:
+    """Translate Persian (or any language) medical text to English for RAG lookup."""
+    try:
+        result = GoogleTranslator(source="auto", target="en").translate(text)
+        return result if result else text
+    except Exception as e:
+        print(f"Translation (→en) error: {e}")
+        return text
+
+
 def translate_to_persian(text: str) -> str:
     """Translate English medical text to Persian.
 
@@ -213,7 +223,12 @@ def _get_s3_client() -> _S3Client:
             aws_access_key_id=os.getenv("LIARA_ACCESS_KEY"),
             aws_secret_access_key=os.getenv("LIARA_SECRET_KEY"),
             region_name="us-east-1",
-            config=_BotocoreConfig(signature_version="s3v4"),
+            config=_BotocoreConfig(
+                signature_version="s3v4",
+                connect_timeout=10,
+                read_timeout=30,
+                retries={"max_attempts": 2},
+            ),
         )
     return _s3_client
 
