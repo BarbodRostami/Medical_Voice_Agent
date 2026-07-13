@@ -56,6 +56,15 @@ def _normalize_ollama_host(raw: str | None) -> str:
 OLLAMA_HOST = _normalize_ollama_host(os.getenv("OLLAMA_HOST"))
 MAX_CACHE_SIZE = 100
 
+
+def _public_base_url(req: Request) -> str:
+    """External URL for audio_url — use PUBLIC_API_URL on server if set."""
+    override = os.getenv("PUBLIC_API_URL", "").strip()
+    if override:
+        return override if override.endswith("/") else override + "/"
+    return str(req.base_url)
+
+
 _cache: OrderedDict[str, dict] = OrderedDict()
 
 # ─── Job Manager ──────────────────────────────────────────────────────────────
@@ -426,7 +435,7 @@ async def generate_voice(request: Request):
 
     try:
         file_key = upload_mp3_to_liara(audio_bytes)
-        audio_url = str(request.base_url) + f"voice/audio/{file_key}"
+        audio_url = _public_base_url(request) + f"voice/audio/{file_key}"
         return {"audio_url": audio_url, "status": "uploaded"}
     except Exception:
         return Response(
@@ -444,7 +453,7 @@ async def generate_voice(request: Request):
     },
     summary="Ask a medical question and get an MP3 voice answer",
 )
-async def chat_voice(request: QuestionRequest):
+async def chat_voice(body: QuestionRequest, req: Request):
     """
     One-shot endpoint: runs RAG retrieval + LLM answer + Persian TTS.
     Send a question, receive an MP3 file directly.
@@ -452,7 +461,7 @@ async def chat_voice(request: QuestionRequest):
     if db is None or llm is None or bm25_retriever is None:
         raise HTTPException(status_code=500, detail="System not initialized.")
 
-    query = request.query
+    query = body.query
     key = _cache_key(query)
     cached = _get_cache(key)
 
@@ -480,7 +489,7 @@ async def chat_voice(request: QuestionRequest):
 
     try:
         file_key = upload_mp3_to_liara(audio_bytes)
-        audio_url = str(request.base_url) + f"voice/audio/{file_key}"
+        audio_url = _public_base_url(req) + f"voice/audio/{file_key}"
         return {"query": query, "audio_url": audio_url, "status": "uploaded"}
     except Exception:
         return Response(
@@ -669,7 +678,7 @@ async def job_chat_voice(request: QuestionRequest, req: Request):
     if db is None or llm is None:
         raise HTTPException(status_code=500, detail="System not initialized.")
     job_id = _new_job()
-    base_url = str(req.base_url)
+    base_url = _public_base_url(req)
     _job_executor.submit(_worker_chat_voice, job_id, request.query, base_url)
     return {
         "job_id": job_id,
@@ -708,7 +717,7 @@ async def job_voice_report(req: Request):
     full_text = "  ".join(parts)
 
     job_id = _new_job()
-    base_url = str(req.base_url)
+    base_url = _public_base_url(req)
     _job_executor.submit(_worker_voice, job_id, full_text, base_url)
     return {
         "job_id": job_id,
@@ -737,7 +746,7 @@ async def job_voice_input(req: Request, file: UploadFile = File(...)):
         tmp_path = tmp.name
 
     job_id = _new_job()
-    base_url = str(req.base_url)
+    base_url = _public_base_url(req)
     _job_executor.submit(_worker_voice_input, job_id, tmp_path, base_url)
     return {
         "job_id": job_id,
