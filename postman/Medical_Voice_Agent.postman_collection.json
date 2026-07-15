@@ -1,0 +1,329 @@
+{
+  "info": {
+    "_postman_id": "medical-voice-agent-api",
+    "name": "Medical Voice Agent API",
+    "description": "Complete API collection for the Medical Voice Agent backend.\n\n## Quick start\n1. Import this collection **and** `Medical_Voice_Agent.postman_environment.json`\n2. Select environment **Medical Voice Agent — Company Server**\n3. Run **Health Check** first\n4. Use **Async Jobs** folder (recommended for frontend)\n\n## Async flow\n1. `POST /jobs/voice-report` or `/jobs/chat` or `/stt/ask` → copy `job_id` (auto-saved)\n2. `GET /jobs/{{job_id}}` every 3–5 seconds\n3. When `status` = `done`, use `audio_url` in `<audio src=\"...\">`\n\n## Server\n- Company VM: `http://192.168.1.15:8000`\n- Swagger: `{{base_url}}/docs`\n\n## Notes\n- `audio_url` path may be `.../voice/audio/audio/xxx.mp3` (object key includes `audio/` prefix)\n- Jobs are in-memory; lost on server restart\n- STT: upload MP3/WAV/WebM in form field `file`",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://192.168.1.15:8000"
+    },
+    {
+      "key": "job_id",
+      "value": ""
+    },
+    {
+      "key": "audio_key",
+      "value": "audio/example.mp3"
+    }
+  ],
+  "item": [
+    {
+      "name": "01 — Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/",
+            "description": "Verify API is running and ChromaDB is loaded."
+          },
+          "response": []
+        },
+        {
+          "name": "OpenAPI Schema",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/openapi.json",
+            "description": "Machine-readable API schema (Swagger source)."
+          },
+          "response": []
+        }
+      ],
+      "description": "Basic connectivity checks."
+    },
+    {
+      "name": "02 — Async Jobs (recommended for frontend)",
+      "item": [
+        {
+          "name": "Create Job — Voice Report (TTS)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "if (json.job_id) {",
+                  "    pm.collectionVariables.set('job_id', json.job_id);",
+                  "    pm.environment.set('job_id', json.job_id);",
+                  "    console.log('job_id saved:', json.job_id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"report-1\": {\n    \"tafsir\": \"تست تفسیر بالینی\",\n    \"recom\": \"تست توصیه درمانی\"\n  }\n}"
+            },
+            "url": "{{base_url}}/jobs/voice-report",
+            "description": "Submit Persian medical report for TTS + S3 upload.\n\nPoll with **Get Job Status** using returned `job_id`."
+          },
+          "response": []
+        },
+        {
+          "name": "Create Job — Chat (RAG + voice)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "if (json.job_id) {",
+                  "    pm.collectionVariables.set('job_id', json.job_id);",
+                  "    pm.environment.set('job_id', json.job_id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"What is the normal SpO2 range for adults?\"\n}"
+            },
+            "url": "{{base_url}}/jobs/chat",
+            "description": "English medical question → RAG → Persian answer + TTS.\n\nResponse fields when done: `answer`, `answer_en`, `audio_url`."
+          },
+          "response": []
+        },
+        {
+          "name": "Create Job — STT Ask (voice input)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "if (json.job_id) {",
+                  "    pm.collectionVariables.set('job_id', json.job_id);",
+                  "    pm.environment.set('job_id', json.job_id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "description": "Persian audio: MP3, WAV, WebM, M4A",
+                  "type": "file",
+                  "src": []
+                }
+              ]
+            },
+            "url": "{{base_url}}/stt/ask",
+            "description": "Upload audio file → Whisper STT (fa) → translate → RAG → Persian answer + TTS.\n\n**Select a file** in Body → form-data → file field before sending."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Job Status (poll)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200 or 404', () => {",
+                  "    pm.expect([200, 404]).to.include(pm.response.code);",
+                  "});",
+                  "if (pm.response.code === 200) {",
+                  "    const json = pm.response.json();",
+                  "    console.log('status:', json.status);",
+                  "    if (json.audio_url) console.log('audio_url:', json.audio_url);",
+                  "    if (json.status === 'done') {",
+                  "        pm.test('Has audio_url when done', () => {",
+                  "            pm.expect(json.audio_url).to.be.a('string').and.not.empty;",
+                  "        });",
+                  "    }",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/jobs/{{job_id}}",
+            "description": "Poll every 3–5 seconds until `status` is `done` or `failed`.\n\n`job_id` is auto-filled after Create Job requests.\n\n**done fields:** `audio_url`, `answer`, `transcription`, `query_en` (STT only)"
+          },
+          "response": []
+        }
+      ],
+      "description": "Primary integration path for frontend: submit job → poll → use audio_url."
+    },
+    {
+      "name": "03 — Sync Chat (text only)",
+      "item": [
+        {
+          "name": "Chat",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"What is the normal ETCO2 range?\"\n}"
+            },
+            "url": "{{base_url}}/chat",
+            "description": "Synchronous RAG chat — returns English answer immediately (no voice)."
+          },
+          "response": []
+        },
+        {
+          "name": "Chat Stream",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"What is the normal heart rate for adults?\"\n}"
+            },
+            "url": "{{base_url}}/chat/stream",
+            "description": "Streaming plain-text tokens (not JSON)."
+          },
+          "response": []
+        },
+        {
+          "name": "Translate (EN → FA)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"The patient has stable vital signs.\"\n}"
+            },
+            "url": "{{base_url}}/translate",
+            "description": "Translate English medical text to Persian via LLM."
+          },
+          "response": []
+        }
+      ],
+      "description": "Legacy/sync text endpoints (no job queue)."
+    },
+    {
+      "name": "04 — Sync Voice (one-shot)",
+      "item": [
+        {
+          "name": "Voice Report (sync TTS)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tafsir\": \"تست تفسیر\",\n  \"recom\": \"تست توصیه\"\n}"
+            },
+            "url": "{{base_url}}/voice",
+            "description": "Synchronous TTS — waits for MP3 upload. Returns `audio_url` or raw MP3 bytes."
+          },
+          "response": []
+        },
+        {
+          "name": "Chat Voice (sync RAG + TTS)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"What is the normal SpO2 range?\"\n}"
+            },
+            "url": "{{base_url}}/chat/voice",
+            "description": "One-shot: RAG + TTS. Returns JSON with `audio_url` or MP3 fallback."
+          },
+          "response": []
+        },
+        {
+          "name": "Stream Audio (proxy MP3)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/voice/audio/{{audio_key}}",
+            "description": "Play/download MP3 from private S3 via API proxy.\n\nSet `audio_key` from `audio_url` path after `/voice/audio/` (e.g. `audio/abc123.mp3`)."
+          },
+          "response": []
+        }
+      ],
+      "description": "Blocking voice endpoints — prefer Async Jobs for UI."
+    },
+    {
+      "name": "05 — Debug",
+      "item": [
+        {
+          "name": "List All Jobs",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/jobs",
+            "description": "In-memory job list (resets on server restart). Debug only."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
