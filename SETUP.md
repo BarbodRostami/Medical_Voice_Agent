@@ -111,6 +111,22 @@ GET /jobs/{job_id}
 | Base URL | `http://192.168.1.15:8000` |
 | Swagger | `http://192.168.1.15:8000/docs` |
 
+### Postman Collection (تحویل به فرانت)
+
+فایل‌های آماده در پوشه `postman/`:
+
+| فایل | کاربرد |
+|------|--------|
+| `Medical_Voice_Agent.postman_collection.json` | همه endpointها + auto-save `job_id` |
+| `Medical_Voice_Agent.postman_environment.json` | متغیر `base_url` و `job_id` |
+
+**Import در Postman:**
+1. **Import** → هر دو فایل JSON را انتخاب کنید
+2. Environment **Medical Voice Agent — Company Server** را فعال کنید
+3. از folder **02 — Async Jobs** شروع کنید
+
+**Share با همکار:** فایل‌های `postman/*.json` را بفرستید یا Collection را Export/Share کنید.
+
 ---
 
 ## ۶. Deploy روی سرور Linux (شرکت)
