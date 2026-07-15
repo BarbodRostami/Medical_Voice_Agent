@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import threading
 import uuid
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
@@ -23,12 +25,14 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from pydantic import BaseModel
 
 from medical_voice_utils import (
+    build_audio_proxy_url,
     download_mp3_from_storage,
     english_to_persian_voice,
     persian_to_voice,
     translate_to_english,
     translate_to_persian,
     upload_mp3_to_liara,
+    upload_mp3_with_timeout,
 )
 from stt_utils import detect_audio_extension, transcribe_medical_speech
 
@@ -78,16 +82,20 @@ _job_executor = ThreadPoolExecutor(max_workers=5)
 
 # Whisper model — loaded once on first STT request (lazy, ~150MB for "tiny")
 _whisper_model = None
+_whisper_lock = threading.Lock()
 _WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small")  # tiny / small / medium
 
 
 def _get_whisper() -> "WhisperModel":
     global _whisper_model
-    if _whisper_model is None:
-        from faster_whisper import WhisperModel
-        print(f"Loading Whisper model '{_WHISPER_MODEL_SIZE}'...")
-        _whisper_model = WhisperModel(_WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
-        print("Whisper ready.")
+    if _whisper_model is not None:
+        return _whisper_model
+    with _whisper_lock:
+        if _whisper_model is None:
+            from faster_whisper import WhisperModel
+            print(f"Loading Whisper model '{_WHISPER_MODEL_SIZE}'...")
+            _whisper_model = WhisperModel(_WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
+            print("Whisper ready.")
     return _whisper_model
 
 
@@ -225,8 +233,8 @@ def _build_rag_prompt(query: str, context: str) -> str:
 
 def _clean_llm_output(raw: str, query: str) -> str:
     text = raw.replace("<|im_start|>", "").replace("<|im_end|>", "")
-    for role in ("assistant", "user", "system"):
-        text = text.replace(role, "")
+    # Strip leading chat-role label only — do not remove "system" inside medical text
+    text = re.sub(r"^\s*(assistant|user|system)\s*:?\s*", "", text, flags=re.IGNORECASE)
     for phrase in [
         "You are an expert medical assistant",
         "Answer the user's question",
@@ -435,7 +443,7 @@ async def generate_voice(request: Request):
 
     try:
         file_key = upload_mp3_to_liara(audio_bytes)
-        audio_url = _public_base_url(request) + f"voice/audio/{file_key}"
+        audio_url = build_audio_proxy_url(_public_base_url(request), file_key)
         return {"audio_url": audio_url, "status": "uploaded"}
     except Exception:
         return Response(
@@ -489,7 +497,7 @@ async def chat_voice(body: QuestionRequest, req: Request):
 
     try:
         file_key = upload_mp3_to_liara(audio_bytes)
-        audio_url = _public_base_url(req) + f"voice/audio/{file_key}"
+        audio_url = build_audio_proxy_url(_public_base_url(req), file_key)
         return {"query": query, "audio_url": audio_url, "status": "uploaded"}
     except Exception:
         return Response(
@@ -538,14 +546,8 @@ def _worker_chat_voice(job_id: str, query: str, base_url: str) -> None:
 
         # Step 3: Upload (hard 45s deadline — executor.shutdown(wait=False) avoids blocking)
         _update_job(job_id, message="در حال آپلود فایل صوتی...")
-        try:
-            _up = ThreadPoolExecutor(max_workers=1)
-            fut = _up.submit(upload_mp3_to_liara, audio_bytes)
-            _up.shutdown(wait=False)
-            file_key = fut.result(timeout=45)
-            audio_url = base_url + f"voice/audio/{file_key}"
-        except Exception:
-            audio_url = None
+        file_key = upload_mp3_with_timeout(audio_bytes)
+        audio_url = build_audio_proxy_url(base_url, file_key) if file_key else None
 
         _update_job(
             job_id,
@@ -610,14 +612,8 @@ def _worker_voice_input(job_id: str, audio_path: str, base_url: str) -> None:
 
         # Step 5: Upload
         _update_job(job_id, message="در حال آپلود فایل صوتی...")
-        try:
-            _up = ThreadPoolExecutor(max_workers=1)
-            fut = _up.submit(upload_mp3_to_liara, audio_bytes)
-            _up.shutdown(wait=False)
-            file_key = fut.result(timeout=45)
-            audio_url = base_url + f"voice/audio/{file_key}"
-        except Exception:
-            audio_url = None
+        file_key = upload_mp3_with_timeout(audio_bytes)
+        audio_url = build_audio_proxy_url(base_url, file_key) if file_key else None
 
         _update_job(
             job_id,
@@ -648,14 +644,8 @@ def _worker_voice(job_id: str, full_text: str, base_url: str) -> None:
         audio_bytes = persian_to_voice(full_text)
 
         _update_job(job_id, message="در حال آپلود فایل صوتی...")
-        try:
-            _up = ThreadPoolExecutor(max_workers=1)
-            fut = _up.submit(upload_mp3_to_liara, audio_bytes)
-            _up.shutdown(wait=False)
-            file_key = fut.result(timeout=45)
-            audio_url = base_url + f"voice/audio/{file_key}"
-        except Exception:
-            audio_url = None
+        file_key = upload_mp3_with_timeout(audio_bytes)
+        audio_url = build_audio_proxy_url(base_url, file_key) if file_key else None
 
         _update_job(job_id, status="done", message="تکمیل شد.", audio_url=audio_url)
 
@@ -701,6 +691,9 @@ async def job_voice_report(req: Request):
         body: dict = await req.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body.")
+
+    if not body:
+        raise HTTPException(status_code=400, detail="Empty request body.")
 
     first_value = next(iter(body.values()))
     data = first_value if isinstance(first_value, dict) else body

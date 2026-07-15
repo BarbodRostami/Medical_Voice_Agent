@@ -100,7 +100,7 @@ file: (فایل صوتی MP3/WAV — فارسی)
 GET /jobs/{job_id}
 
 # ۳) وقتی status=done شد
-# audio_url → لینک پخش MP3 (ممکن است مسیر .../voice/audio/audio/xxx.mp3 باشد)
+# audio_url → لینک پخش MP3 (مسیر: .../voice/audio/{uuid}.mp3)
 # answer → پاسخ فارسی (در /jobs/chat و /stt/ask)
 ```
 
@@ -258,7 +258,7 @@ lsof -i :8000                  # Mac/Linux
 
 **مشکل: audio_url برمی‌گردد ولی 404 در مرورگر**
 - `audio_url` را دقیقاً از poll کپی کنید (یک کاراکتر اشتباه = 404)
-- مسیر ممکن است `.../voice/audio/audio/xxx.mp3` باشد (دو بار `audio`)
+- مسیر صحیح: `.../voice/audio/{uuid}.mp3`
 
 **مشکل: ModuleNotFoundError: boto3 داخل کانتینر**
 - branch قدیمی (`main`) است — به `feature/async-stt-jobs` بروید

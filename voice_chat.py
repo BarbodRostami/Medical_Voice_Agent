@@ -11,7 +11,7 @@ from deep_translator import GoogleTranslator
 # --- تنظیمات سیستم ---
 PIPER_MODEL = "fa_IR-amir-medium.onnx"
 LLM_MODEL = "biomistral"
-EMBEDDING_MODEL = "ncbi/MedCPT-Query-Encoder"
+EMBEDDING_MODEL = "ncbi/MedCPT-Article-Encoder"
 PERSIST_DIRECTORY = "db"
 
 # ۱. تنظیمات مترجم
