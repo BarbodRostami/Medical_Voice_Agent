@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import threading
 import uuid
 from collections import OrderedDict
@@ -24,6 +23,7 @@ from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from pydantic import BaseModel
 
+from llm_output import clean_llm_output
 from medical_voice_utils import (
     build_audio_proxy_url,
     download_mp3_from_storage,
@@ -232,21 +232,8 @@ def _build_rag_prompt(query: str, context: str) -> str:
 
 
 def _clean_llm_output(raw: str, query: str) -> str:
-    text = raw.replace("<|im_start|>", "").replace("<|im_end|>", "")
-    # Strip leading chat-role label only — do not remove "system" inside medical text
-    text = re.sub(r"^\s*(assistant|user|system)\s*:?\s*", "", text, flags=re.IGNORECASE)
-    for phrase in [
-        "You are an expert medical assistant",
-        "Answer the user's question",
-        "Context:",
-        query[:50],
-    ]:
-        if phrase in text:
-            text = text.split(phrase)[-1]
-    text = text.strip().lstrip(":").strip()
-    if text.lower().startswith("answer:"):
-        text = text[7:].strip()
-    return text if len(text) >= 5 else raw.strip()
+    """Backward-compatible wrapper around clean_llm_output."""
+    return clean_llm_output(raw, query)
 
 
 def _save_to_django(question: str, answer: str) -> None:

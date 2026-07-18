@@ -280,12 +280,19 @@ def upload_mp3_to_liara(audio_bytes: bytes, filename: str | None = None) -> str:
 
 
 def upload_mp3_with_timeout(audio_bytes: bytes, timeout: float = 45) -> str | None:
-    """Upload MP3 with a hard deadline; returns public key or None on failure."""
+    """Upload MP3 with a hard deadline; returns public key or None on failure.
+
+    Uses shutdown(wait=False) so a hung S3 call cannot block the worker after
+    ``result(timeout=...)`` raises — the ``with`` form of ThreadPoolExecutor
+    would call shutdown(wait=True) on exit and defeat the deadline.
+    """
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(upload_mp3_to_liara, audio_bytes).result(timeout=timeout)
+        return pool.submit(upload_mp3_to_liara, audio_bytes).result(timeout=timeout)
     except Exception:
         return None
+    finally:
+        pool.shutdown(wait=False)
 
 
 def download_mp3_from_storage(key: str) -> bytes:
