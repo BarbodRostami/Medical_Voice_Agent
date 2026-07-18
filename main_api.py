@@ -22,6 +22,7 @@ from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from pydantic import BaseModel
 
+from api_auth import configured_api_key, enforce_api_key
 from medical_voice_utils import (
     download_mp3_from_storage,
     english_to_persian_voice,
@@ -33,6 +34,7 @@ from medical_voice_utils import (
 from stt_utils import detect_audio_extension, transcribe_medical_speech
 
 app = FastAPI(title="Medical RAG API")
+app.middleware("http")(enforce_api_key)
 
 PERSIST_DIRECTORY = "db"
 # Must match the model used in ingestion.py (MedCPT — a medical-domain encoder)
@@ -154,6 +156,10 @@ try:
         stop=["<|im_start|>", "<|im_end|>", "user:", "assistant:"],
     )
     print("Models loaded successfully!")
+    if configured_api_key():
+        print("API key auth ENABLED (header X-API-Key required except / and /voice/audio/*).")
+    else:
+        print("WARNING: API_KEY is not set — API endpoints are open on the network.")
 except Exception as e:
     print(f"Error during initialization: {e}")
 

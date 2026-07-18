@@ -14,6 +14,13 @@ from medical_voice_utils import (
 APP_DIR = Path(__file__).resolve().parent
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000/chat")
 BACKEND_STREAM_URL = os.getenv("BACKEND_STREAM_URL", "http://localhost:8000/chat/stream")
+API_KEY = os.getenv("API_KEY", "").strip()
+
+
+def _backend_headers() -> dict[str, str]:
+    if API_KEY:
+        return {"X-API-Key": API_KEY}
+    return {}
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -42,6 +49,7 @@ def stream_from_backend(query: str):
         with requests.post(
             BACKEND_STREAM_URL,
             json={"query": query},
+            headers=_backend_headers(),
             stream=True,
             timeout=180,
         ) as resp:
@@ -58,7 +66,12 @@ def stream_from_backend(query: str):
 def get_source_count(query: str) -> int:
     """Fetch source document count (cache hit — instant after streaming)."""
     try:
-        resp = requests.post(BACKEND_URL, json={"query": query}, timeout=10)
+        resp = requests.post(
+            BACKEND_URL,
+            json={"query": query},
+            headers=_backend_headers(),
+            timeout=10,
+        )
         if resp.status_code == 200:
             return resp.json().get("source_documents_count", 0)
     except Exception:

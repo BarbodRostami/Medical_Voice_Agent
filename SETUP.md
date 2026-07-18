@@ -83,24 +83,34 @@ docker compose logs -f backend
 
 ### جریان async (پیشنهادی)
 
+اگر `API_KEY` در `.env` ست شده، همه درخواست‌ها (به‌جز `GET /` و پخش `/voice/audio/...`) باید هدر داشته باشند:
+
+```
+X-API-Key: <your-api-key>
+```
+
 ```bash
 # ۱) ارسال درخواست — فوری job_id برمی‌گردد
 POST /jobs/voice-report
 Content-Type: application/json
+X-API-Key: <your-api-key>
 {"uuid": {"tafsir": "...", "recom": "..."}}
 
 POST /jobs/chat
+X-API-Key: <your-api-key>
 {"query": "What is the normal ETCO2 range?"}
 
 POST /stt/ask
 Content-Type: multipart/form-data
+X-API-Key: <your-api-key>
 file: (فایل صوتی MP3/WAV — فارسی)
 
 # ۲) بررسی وضعیت — هر ۳-۵ ثانیه
 GET /jobs/{job_id}
+X-API-Key: <your-api-key>
 
 # ۳) وقتی status=done شد
-# audio_url → لینک پخش MP3 (ممکن است مسیر .../voice/audio/audio/xxx.mp3 باشد)
+# audio_url → لینک پخش MP3 (بدون نیاز به API key در مرورگر)
 # answer → پاسخ فارسی (در /jobs/chat و /stt/ask)
 ```
 
@@ -110,6 +120,7 @@ GET /jobs/{job_id}
 |------|--------|
 | Base URL | `http://192.168.1.15:8000` |
 | Swagger | `http://192.168.1.15:8000/docs` |
+| Auth header | `X-API-Key` (اگر `API_KEY` در `.env` ست شده باشد) |
 
 ---
 
