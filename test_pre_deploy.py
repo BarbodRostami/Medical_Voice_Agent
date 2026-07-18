@@ -8,6 +8,8 @@ import time
 import edge_tts
 import requests
 
+from api_auth import request_headers
+
 BASE = "http://localhost:8000"
 POLL_INTERVAL = 5
 MAX_WAIT = 300
@@ -17,7 +19,7 @@ VENV_PYTHON = sys.executable
 def poll_job(job_id: str) -> dict:
     start = time.time()
     while time.time() - start < MAX_WAIT:
-        r = requests.get(f"{BASE}/jobs/{job_id}", timeout=10)
+        r = requests.get(f"{BASE}/jobs/{job_id}", headers=request_headers(), timeout=10)
         r.raise_for_status()
         data = r.json()
         if data["status"] in ("done", "failed"):
@@ -67,7 +69,12 @@ def main() -> int:
                 "recom": "ادامه مانیتورینگ.",
             }
         }
-        r = requests.post(f"{BASE}/jobs/voice-report", json=payload, timeout=15)
+        r = requests.post(
+            f"{BASE}/jobs/voice-report",
+            json=payload,
+            headers=request_headers(),
+            timeout=15,
+        )
         data = r.json()
         results.append(ok("Submit returns 200", r.status_code == 200))
         results.append(ok("Returns job_id", "job_id" in data))
@@ -86,6 +93,7 @@ def main() -> int:
         r = requests.post(
             f"{BASE}/jobs/chat",
             json={"query": "What is the normal SpO2 range?"},
+            headers=request_headers(),
             timeout=15,
         )
         data = r.json()
@@ -116,6 +124,7 @@ def main() -> int:
             r = requests.post(
                 f"{BASE}/stt/ask",
                 files={"file": ("q.mp3", f, "audio/mpeg")},
+                headers=request_headers(),
                 timeout=15,
             )
         data = r.json()

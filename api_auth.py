@@ -18,6 +18,11 @@ def configured_api_key() -> str:
     return os.getenv("API_KEY", "").strip()
 
 
+def request_headers() -> dict[str, str]:
+    """Headers for outbound calls to a key-protected Medical RAG API."""
+    key = configured_api_key()
+    return {"X-API-Key": key} if key else {}
+
 def api_keys_match(provided: str | None, expected: str) -> bool:
     if not provided:
         return False

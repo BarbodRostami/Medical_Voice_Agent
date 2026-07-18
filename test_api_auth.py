@@ -37,6 +37,21 @@ class ApiAuthTests(unittest.TestCase):
             else:
                 os.environ["API_KEY"] = old
 
+    def test_request_headers_includes_key_when_set(self) -> None:
+        from api_auth import request_headers
+
+        old = os.environ.get("API_KEY")
+        try:
+            os.environ["API_KEY"] = "hdr-secret"
+            self.assertEqual(request_headers(), {"X-API-Key": "hdr-secret"})
+            del os.environ["API_KEY"]
+            self.assertEqual(request_headers(), {})
+        finally:
+            if old is None:
+                os.environ.pop("API_KEY", None)
+            else:
+                os.environ["API_KEY"] = old
+
 
 class ApiAuthMiddlewareTests(unittest.IsolatedAsyncioTestCase):
     async def test_rejects_missing_key_when_configured(self) -> None:

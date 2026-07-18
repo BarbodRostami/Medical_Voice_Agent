@@ -1,13 +1,19 @@
 """Test Persian voice input: user speaks Farsi → gets Farsi answer"""
-import asyncio, time, requests, edge_tts
+import asyncio
+import time
 
-BASE = 'http://localhost:8000'
+import edge_tts
+import requests
+
+from api_auth import request_headers
+
+BASE = "http://localhost:8000"
 
 # Step 1: generate a Persian question as test audio
 async def make_persian_audio():
     comm = edge_tts.Communicate(
         "محدوده طبیعی دی اکسید کربن بازدمی در کاپنوگرافی چقدر است؟",
-        voice="fa-IR-DilaraNeural"
+        voice="fa-IR-DilaraNeural",
     )
     await comm.save("test_persian_input.mp3")
 
@@ -18,7 +24,12 @@ print("test_persian_input.mp3 ساخته شد.")
 # Step 2: submit
 print("\nارسال به POST /stt/ask ...")
 with open("test_persian_input.mp3", "rb") as f:
-    r = requests.post(f"{BASE}/stt/ask", files={"file": ("persian.mp3", f, "audio/mpeg")}, timeout=15)
+    r = requests.post(
+        f"{BASE}/stt/ask",
+        files={"file": ("persian.mp3", f, "audio/mpeg")},
+        headers=request_headers(),
+        timeout=15,
+    )
 
 print(f"پاسخ فوری ({r.status_code}):", r.json())
 job_id = r.json()["job_id"]
@@ -28,7 +39,7 @@ print(f"Job ID: {job_id[:8]}...")
 print("\nبررسی وضعیت...")
 for i in range(80):
     time.sleep(5)
-    s = requests.get(f"{BASE}/jobs/{job_id}", timeout=5).json()
+    s = requests.get(f"{BASE}/jobs/{job_id}", headers=request_headers(), timeout=5).json()
     status = s["status"]
     msg = s["message"]
     print(f"[{(i+1)*5:>3}s] {status:12} | {msg}")

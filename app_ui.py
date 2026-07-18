@@ -3,6 +3,7 @@ from pathlib import Path
 
 import requests
 import streamlit as st
+from api_auth import request_headers
 from medical_voice_utils import (
     clean_persian_for_tts,
     tts_to_mp3,
@@ -14,13 +15,6 @@ from medical_voice_utils import (
 APP_DIR = Path(__file__).resolve().parent
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000/chat")
 BACKEND_STREAM_URL = os.getenv("BACKEND_STREAM_URL", "http://localhost:8000/chat/stream")
-API_KEY = os.getenv("API_KEY", "").strip()
-
-
-def _backend_headers() -> dict[str, str]:
-    if API_KEY:
-        return {"X-API-Key": API_KEY}
-    return {}
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -49,7 +43,7 @@ def stream_from_backend(query: str):
         with requests.post(
             BACKEND_STREAM_URL,
             json={"query": query},
-            headers=_backend_headers(),
+            headers=request_headers(),
             stream=True,
             timeout=180,
         ) as resp:
@@ -69,7 +63,7 @@ def get_source_count(query: str) -> int:
         resp = requests.post(
             BACKEND_URL,
             json={"query": query},
-            headers=_backend_headers(),
+            headers=request_headers(),
             timeout=10,
         )
         if resp.status_code == 200:

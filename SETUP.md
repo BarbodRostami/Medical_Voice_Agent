@@ -110,8 +110,7 @@ GET /jobs/{job_id}
 X-API-Key: <your-api-key>
 
 # ۳) وقتی status=done شد
-# audio_url → لینک پخش MP3 (بدون نیاز به API key در مرورگر)
-# answer → پاسخ فارسی (در /jobs/chat و /stt/ask)
+# audio_url → لینک پخش MP3 (مسیر: .../voice/audio/{uuid}.mp3 — بدون نیاز به API key در مرورگر)# answer → پاسخ فارسی (در /jobs/chat و /stt/ask)
 ```
 
 ### آدرس سرور شرکت (تست‌شده)
@@ -121,6 +120,22 @@ X-API-Key: <your-api-key>
 | Base URL | `http://192.168.1.15:8000` |
 | Swagger | `http://192.168.1.15:8000/docs` |
 | Auth header | `X-API-Key` (اگر `API_KEY` در `.env` ست شده باشد) |
+
+### Postman Collection (تحویل به فرانت)
+
+فایل‌های آماده در پوشه `postman/`:
+
+| فایل | کاربرد |
+|------|--------|
+| `Medical_Voice_Agent.postman_collection.json` | همه endpointها + auto-save `job_id` |
+| `Medical_Voice_Agent.postman_environment.json` | متغیر `base_url` و `job_id` |
+
+**Import در Postman:**
+1. **Import** → هر دو فایل JSON را انتخاب کنید
+2. Environment **Medical Voice Agent — Company Server** را فعال کنید
+3. از folder **02 — Async Jobs** شروع کنید
+
+**Share با همکار:** فایل‌های `postman/*.json` را بفرستید یا Collection را Export/Share کنید.
 
 ---
 
@@ -253,7 +268,7 @@ lsof -i :8000                  # Mac/Linux
 
 **مشکل: audio_url برمی‌گردد ولی 404 در مرورگر**
 - `audio_url` را دقیقاً از poll کپی کنید (یک کاراکتر اشتباه = 404)
-- مسیر ممکن است `.../voice/audio/audio/xxx.mp3` باشد (دو بار `audio`)
+- مسیر صحیح: `.../voice/audio/{uuid}.mp3`
 
 **مشکل: ModuleNotFoundError: boto3 داخل کانتینر**
 - branch قدیمی (`main`) است — به `feature/async-stt-jobs` بروید
