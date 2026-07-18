@@ -6,7 +6,7 @@ from langchain_community.llms import Ollama
 # نام مدلی که در Ollama ساختید
 LLM_MODEL = "biomistral" 
 # مدل Embedding که برای ساخت دیتابیس استفاده شد
-EMBEDDING_MODEL = "ncbi/MedCPT-Query-Encoder"
+EMBEDDING_MODEL = "ncbi/MedCPT-Article-Encoder"
 PERSIST_DIRECTORY = "db"
 
 def start_chat():
