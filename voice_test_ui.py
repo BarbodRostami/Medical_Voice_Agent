@@ -14,6 +14,7 @@ from pathlib import Path
 import requests
 import streamlit as st
 
+from api_auth import request_headers
 from medical_voice_utils import persian_to_voice
 from stt_utils import detect_audio_extension
 
@@ -25,7 +26,11 @@ MAX_WAIT = 300
 def _poll_job(job_id: str, status_box: st.empty, progress: st.progress) -> dict:
     start = time.time()
     while time.time() - start < MAX_WAIT:
-        r = requests.get(f"{API_BASE}/jobs/{job_id}", timeout=15)
+        r = requests.get(
+            f"{API_BASE}/jobs/{job_id}",
+            headers=request_headers(),
+            timeout=15,
+        )
         r.raise_for_status()
         data = r.json()
         elapsed = int(time.time() - start)
@@ -60,6 +65,7 @@ def _submit_stt(audio_bytes: bytes, filename: str, content_type: str | None = No
             r = requests.post(
                 f"{API_BASE}/stt/ask",
                 files={"file": (safe_name, f, mime)},
+                headers=request_headers(),
                 timeout=30,
             )
         r.raise_for_status()
@@ -183,7 +189,12 @@ with tab_report:
         else:
             payload = {"local-test": {"tafsir": tafsir.strip(), "recom": recom.strip()}}
             try:
-                r = requests.post(f"{API_BASE}/jobs/voice-report", json=payload, timeout=15)
+                r = requests.post(
+                    f"{API_BASE}/jobs/voice-report",
+                    json=payload,
+                    headers=request_headers(),
+                    timeout=15,
+                )
                 r.raise_for_status()
                 job_id = r.json()["job_id"]
                 status_box = st.empty()
@@ -202,7 +213,12 @@ with tab_text:
     query = st.text_input("سوال پزشکی (انگلیسی بهتر است)", placeholder="What is the normal SpO2 range?")
     if st.button("پرسش + جواب صوتی", type="primary") and query.strip():
         try:
-            r = requests.post(f"{API_BASE}/jobs/chat", json={"query": query.strip()}, timeout=15)
+            r = requests.post(
+                f"{API_BASE}/jobs/chat",
+                json={"query": query.strip()},
+                headers=request_headers(),
+                timeout=15,
+            )
             r.raise_for_status()
             job_id = r.json()["job_id"]
             status_box = st.empty()

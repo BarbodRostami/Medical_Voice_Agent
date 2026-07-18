@@ -3,6 +3,7 @@ from pathlib import Path
 
 import requests
 import streamlit as st
+from api_auth import request_headers
 from medical_voice_utils import (
     clean_persian_for_tts,
     tts_to_mp3,
@@ -42,6 +43,7 @@ def stream_from_backend(query: str):
         with requests.post(
             BACKEND_STREAM_URL,
             json={"query": query},
+            headers=request_headers(),
             stream=True,
             timeout=180,
         ) as resp:
@@ -58,7 +60,12 @@ def stream_from_backend(query: str):
 def get_source_count(query: str) -> int:
     """Fetch source document count (cache hit — instant after streaming)."""
     try:
-        resp = requests.post(BACKEND_URL, json={"query": query}, timeout=10)
+        resp = requests.post(
+            BACKEND_URL,
+            json={"query": query},
+            headers=request_headers(),
+            timeout=10,
+        )
         if resp.status_code == 200:
             return resp.json().get("source_documents_count", 0)
     except Exception:

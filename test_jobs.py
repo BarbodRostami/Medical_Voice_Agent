@@ -1,11 +1,15 @@
 """
 Quick demo for the async job queue endpoints.
 Run after server is up: python test_jobs.py
+Set API_KEY in the environment if the server requires X-API-Key.
 """
 from __future__ import annotations
 
 import time
+
 import requests
+
+from api_auth import request_headers
 
 BASE = "http://localhost:8000"
 
@@ -14,7 +18,7 @@ def wait_for_job(job_id: str, max_wait: int = 300) -> dict:
     """Poll GET /jobs/{job_id} until done or failed."""
     start = time.time()
     while time.time() - start < max_wait:
-        r = requests.get(f"{BASE}/jobs/{job_id}", timeout=10)
+        r = requests.get(f"{BASE}/jobs/{job_id}", headers=request_headers(), timeout=10)
         data = r.json()
         status = data["status"]
         print(f"  [{int(time.time()-start):>3}s] status={status:12} | {data['message']}")
@@ -29,7 +33,7 @@ def test_chat_job():
     print("TEST 1: POST /jobs/chat  (RAG → TTS → S3)")
     print("══════════════════════════════════════════")
     payload = {"query": "What is the normal ETCO2 range in capnography?"}
-    r = requests.post(f"{BASE}/jobs/chat", json=payload, timeout=10)
+    r = requests.post(f"{BASE}/jobs/chat", json=payload, headers=request_headers(), timeout=10)
     print(f"Immediate response ({r.status_code}): {r.json()}")
     job_id = r.json()["job_id"]
     result = wait_for_job(job_id)
@@ -51,7 +55,12 @@ def test_voice_report_job():
             "recom": "ادامه رژیم ضد میکروبی و نظارت دقیق بر عملکرد کلیوی.",
         }
     }
-    r = requests.post(f"{BASE}/jobs/voice-report", json=payload, timeout=10)
+    r = requests.post(
+        f"{BASE}/jobs/voice-report",
+        json=payload,
+        headers=request_headers(),
+        timeout=10,
+    )
     print(f"Immediate response ({r.status_code}): {r.json()}")
     job_id = r.json()["job_id"]
     result = wait_for_job(job_id)
@@ -73,7 +82,7 @@ if __name__ == "__main__":
     print("\n══════════════════════════════════════════")
     print("TEST 3: GET /jobs  (list all jobs)")
     print("══════════════════════════════════════════")
-    r = requests.get(f"{BASE}/jobs", timeout=5)
+    r = requests.get(f"{BASE}/jobs", headers=request_headers(), timeout=5)
     all_jobs = r.json()
     print(f"Total jobs in memory: {all_jobs['total']}")
     for jid, jdata in all_jobs["jobs"].items():
