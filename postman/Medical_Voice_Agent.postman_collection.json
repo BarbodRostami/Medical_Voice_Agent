@@ -311,7 +311,104 @@
       "description": "Blocking voice endpoints — prefer Async Jobs for UI."
     },
     {
-      "name": "05 — Debug",
+      "name": "05 — Collaborator Cases (external server)",
+      "item": [
+        {
+          "name": "Create Case — Text (ask)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "if (json.uuid) {",
+                  "    pm.collectionVariables.set('case_uuid', json.uuid);",
+                  "    pm.environment.set('case_uuid', json.uuid);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-API-Key", "value": "{{api_key}}", "description": "Required when API_KEY is set on server" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"uuid\": \"{{case_uuid}}\",\n  \"text\": \"تفسیر بالینی بیمار پایدار است.\"\n}"
+            },
+            "url": "{{base_url}}/api/ask",
+            "description": "Text-only case → TTS → S3 cases/{uuid}/output/reply.mp3.\n\nAlso available as POST /api/cases with same JSON."
+          },
+          "response": []
+        },
+        {
+          "name": "Create Case — Audio only",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "if (json.uuid) {",
+                  "    pm.environment.set('case_uuid', json.uuid);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-API-Key", "value": "{{api_key}}" }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "uuid", "value": "{{case_uuid}}", "type": "text" },
+                { "key": "file", "type": "file", "src": [], "description": "Select a wav/mp3 file" }
+              ]
+            },
+            "url": "{{base_url}}/api/cases",
+            "description": "Voice-only (no text). STT → RAG → TTS. Do not send text together with file."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Case Status",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-API-Key", "value": "{{api_key}}" }
+            ],
+            "url": "{{base_url}}/api/cases/{{case_uuid}}",
+            "description": "Poll until status=ready. Then use audio_url."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Msg (alias)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-API-Key", "value": "{{api_key}}" }
+            ],
+            "url": "{{base_url}}/api/get-msg?uuid={{case_uuid}}",
+            "description": "Same as Get Case Status — matches external-server naming."
+          },
+          "response": []
+        }
+      ],
+      "description": "External server contract. See COLLABORATOR_API.md. Text XOR audio only."
+    },
+    {
+      "name": "06 — Debug",
       "item": [
         {
           "name": "List All Jobs",

@@ -81,6 +81,9 @@ docker compose logs -f backend
 
 مستندات تعاملی: **http://SERVER_IP:8000/docs**
 
+قرارداد سرور خارجی (uuid + متن یا ویس + S3): فایل **[COLLABORATOR_API.md](COLLABORATOR_API.md)**  
+خلاصه: `POST /api/cases` یا `/api/ask` → poll `GET /api/cases/{uuid}` یا `/api/get-msg?uuid=` → دانلود `audio_url`.
+
 ### جریان async (پیشنهادی)
 
 اگر `API_KEY` در `.env` ست شده، همه درخواست‌ها (به‌جز `GET /` و پخش `/voice/audio/...`) باید هدر داشته باشند:

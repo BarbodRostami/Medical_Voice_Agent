@@ -27,6 +27,10 @@ class ReviewFixTests(unittest.TestCase):
     def test_resolve_storage_key_from_public_name(self) -> None:
         self.assertEqual(resolve_storage_key("abc.mp3"), "audio/abc.mp3")
         self.assertEqual(resolve_storage_key("audio/abc.mp3"), "audio/abc.mp3")
+        self.assertEqual(
+            resolve_storage_key("cases/u1/output/reply.mp3"),
+            "cases/u1/output/reply.mp3",
+        )
 
 
 if __name__ == "__main__":

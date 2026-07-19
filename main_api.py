@@ -21,9 +21,18 @@ from langchain_community.llms import Ollama as OllamaLLM
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from api_auth import configured_api_key, enforce_api_key
+from case_store import (
+    load_meta,
+    new_meta,
+    output_audio_key,
+    save_input_audio,
+    save_input_text,
+    save_meta,
+    validate_case_id,
+)
 from llm_output import clean_llm_output
 from medical_voice_utils import (
     build_audio_proxy_url,
@@ -32,6 +41,7 @@ from medical_voice_utils import (
     persian_to_voice,
     translate_to_english,
     translate_to_persian,
+    upload_mp3_to_key_with_timeout,
     upload_mp3_to_liara,
     upload_mp3_with_timeout,
 )
@@ -82,6 +92,10 @@ JobStatus = Literal["queued", "processing", "done", "failed"]
 _jobs: dict[str, dict] = {}
 _job_executor = ThreadPoolExecutor(max_workers=5)
 
+# Collaborator cases keyed by external uuid (also persisted as cases/{uuid}/meta.json).
+_cases: dict[str, dict] = {}
+_cases_lock = threading.Lock()
+
 # Whisper model — loaded once on first STT request (lazy, ~150MB for "tiny")
 _whisper_model = None
 _whisper_lock = threading.Lock()
@@ -116,6 +130,53 @@ def _new_job() -> str:
 def _update_job(job_id: str, **kwargs) -> None:
     if job_id in _jobs:
         _jobs[job_id].update(kwargs)
+
+
+def _set_case(meta: dict) -> None:
+    with _cases_lock:
+        _cases[meta["uuid"]] = meta
+    try:
+        save_meta(meta)
+    except Exception as e:
+        print(f"Warning: could not persist case meta to S3: {e}")
+
+
+def _patch_case(case_id: str, **kwargs) -> None:
+    with _cases_lock:
+        current = dict(_cases.get(case_id) or {})
+        if not current:
+            return
+        current.update(kwargs)
+        _cases[case_id] = current
+        snapshot = dict(current)
+    try:
+        save_meta(snapshot)
+    except Exception as e:
+        print(f"Warning: could not persist case meta to S3: {e}")
+
+
+def _get_case(case_id: str) -> dict | None:
+    with _cases_lock:
+        cached = _cases.get(case_id)
+        if cached is not None:
+            return dict(cached)
+    try:
+        meta = load_meta(case_id)
+    except Exception as e:
+        print(f"Warning: could not load case meta from S3: {e}")
+        return None
+    if meta is None:
+        return None
+    with _cases_lock:
+        _cases[case_id] = meta
+    return dict(meta)
+
+
+class CaseTextRequest(BaseModel):
+    """JSON body for text-only collaborator cases (aliases: /api/cases, /api/ask)."""
+
+    uuid: str = Field(..., description="External server case id")
+    text: str = Field(..., min_length=1, description="Persian (or TTS-ready) text")
 
 
 db = None
@@ -646,6 +707,163 @@ def _worker_voice(job_id: str, full_text: str, base_url: str) -> None:
         _update_job(job_id, status="failed", message="خطا در پردازش.", error=str(e))
 
 
+def _worker_case_text(case_id: str, text: str, base_url: str) -> None:
+    """Text-only case: TTS → S3 cases/{uuid}/output/reply.mp3 (no RAG — light path)."""
+    try:
+        _patch_case(case_id, status="processing", message="در حال تبدیل متن به صدا...")
+        audio_bytes = persian_to_voice(text)
+        out_key = output_audio_key(case_id)
+        _patch_case(case_id, message="در حال آپلود فایل صوتی...")
+        file_key = upload_mp3_to_key_with_timeout(audio_bytes, out_key)
+        if not file_key:
+            raise RuntimeError("S3 upload failed or timed out")
+        audio_url = build_audio_proxy_url(base_url, file_key)
+        _patch_case(
+            case_id,
+            status="ready",
+            message="تکمیل شد.",
+            audio_url=audio_url,
+            error=None,
+        )
+    except Exception as e:
+        _patch_case(case_id, status="failed", message="خطا در پردازش.", error=str(e))
+
+
+def _worker_case_audio(case_id: str, audio_path: str, base_url: str) -> None:
+    """Voice-only case: STT → RAG → TTS → S3 cases/{uuid}/output/reply.mp3."""
+    try:
+        _patch_case(case_id, status="processing", message="در حال تبدیل صدا به متن...")
+        whisper = _get_whisper()
+        persian_query = transcribe_medical_speech(whisper, audio_path)
+        if not persian_query:
+            _patch_case(
+                case_id,
+                status="failed",
+                message="صدایی شناسایی نشد.",
+                error="Empty transcription",
+            )
+            return
+
+        _patch_case(case_id, message="در حال ترجمه سوال...", transcript=persian_query)
+        query = translate_to_english(persian_query)
+
+        _patch_case(case_id, message="در حال جستجو در پایگاه دانش...")
+        key = _cache_key(query)
+        cached = _get_cache(key)
+        if cached:
+            answer = cached["answer"]
+        else:
+            if db is None or llm is None:
+                raise RuntimeError("System not initialized.")
+            docs = _retrieve(query)
+            context = "\n\n---\n\n".join([doc.page_content for doc in docs])
+            prompt = _build_rag_prompt(query, context)
+            _patch_case(case_id, message="در حال تولید پاسخ با هوش مصنوعی...")
+            raw = llm.invoke(prompt)
+            answer = _clean_llm_output(raw, query)
+            _set_cache(key, answer, len(docs))
+            _save_to_django(query, answer)
+
+        if not answer or len(answer.strip()) < 5:
+            _patch_case(
+                case_id,
+                status="failed",
+                message="پاسخی تولید نشد.",
+                transcript=persian_query,
+                error="LLM returned empty or too-short answer",
+            )
+            return
+
+        _patch_case(case_id, message="در حال تبدیل متن به صدا...")
+        persian_answer, audio_bytes = _answer_to_persian_voice(answer)
+        out_key = output_audio_key(case_id)
+        _patch_case(case_id, message="در حال آپلود فایل صوتی...")
+        file_key = upload_mp3_to_key_with_timeout(audio_bytes, out_key)
+        if not file_key:
+            raise RuntimeError("S3 upload failed or timed out")
+        audio_url = build_audio_proxy_url(base_url, file_key)
+        _patch_case(
+            case_id,
+            status="ready",
+            message="تکمیل شد.",
+            transcript=persian_query,
+            answer=persian_answer,
+            audio_url=audio_url,
+            error=None,
+        )
+    except Exception as e:
+        _patch_case(case_id, status="failed", message="خطا در پردازش.", error=str(e))
+    finally:
+        try:
+            os.remove(audio_path)
+        except Exception:
+            pass
+
+
+def _enqueue_case_text(case_id: str, text: str, base_url: str) -> dict:
+    cleaned = text.strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="text must not be empty.")
+    try:
+        save_input_text(case_id, cleaned)
+    except Exception as e:
+        print(f"Warning: could not store case input text: {e}")
+    meta = new_meta(case_id, mode="text")
+    _set_case(meta)
+    _job_executor.submit(_worker_case_text, case_id, cleaned, base_url)
+    return {
+        "uuid": case_id,
+        "status": "queued",
+        "mode": "text",
+        "message": "پذیرفته شد — وضعیت را با GET /api/cases/{uuid} یا GET /api/get-msg?uuid=... بگیرید.",
+    }
+
+
+def _enqueue_case_audio(
+    case_id: str,
+    raw: bytes,
+    filename: str | None,
+    content_type: str | None,
+    base_url: str,
+) -> dict:
+    if db is None or llm is None:
+        raise HTTPException(status_code=500, detail="System not initialized.")
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty audio upload.")
+    suffix = detect_audio_extension(raw, filename, content_type)
+    try:
+        save_input_audio(case_id, raw, suffix)
+    except Exception as e:
+        print(f"Warning: could not store case input audio: {e}")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(raw)
+        tmp_path = tmp.name
+    meta = new_meta(case_id, mode="audio")
+    _set_case(meta)
+    _job_executor.submit(_worker_case_audio, case_id, tmp_path, base_url)
+    return {
+        "uuid": case_id,
+        "status": "queued",
+        "mode": "audio",
+        "message": "فایل صوتی دریافت شد — وضعیت را با GET /api/cases/{uuid} بگیرید.",
+    }
+
+
+def _case_public_view(meta: dict) -> dict:
+    return {
+        "uuid": meta.get("uuid"),
+        "status": meta.get("status"),
+        "mode": meta.get("mode"),
+        "message": meta.get("message"),
+        "audio_url": meta.get("audio_url"),
+        "transcript": meta.get("transcript"),
+        "answer": meta.get("answer"),
+        "error": meta.get("error"),
+        "created_at": meta.get("created_at"),
+        "updated_at": meta.get("updated_at"),
+    }
+
+
 # ─── Job Endpoints ────────────────────────────────────────────────────────────
 
 @app.post(
@@ -759,6 +977,138 @@ async def get_job_status(job_id: str):
 @app.get("/jobs", summary="List all jobs (debug)")
 async def list_jobs():
     return {"total": len(_jobs), "jobs": _jobs}
+
+
+# ─── Collaborator Cases (external server ↔ voice server via S3) ───────────────
+
+@app.post(
+    "/api/cases",
+    summary="Create case (text XOR audio) keyed by external uuid",
+    response_description="Accepted immediately; poll GET /api/cases/{uuid}",
+)
+async def create_case(req: Request):
+    """
+    External-server contract (exactly one input mode — not both):
+
+    - **Text:** JSON ``{\"uuid\",\"text\"}`` or multipart fields ``uuid`` + ``text``
+      → TTS only → ``cases/{uuid}/output/reply.mp3``
+    - **Audio:** multipart ``uuid`` + ``file`` (text empty/omitted)
+      → STT → RAG → TTS → same output key
+
+    Poll ``GET /api/cases/{uuid}`` (or ``GET /api/get-msg?uuid=``) for ``audio_url``.
+    """
+    content_type = (req.headers.get("content-type") or "").lower()
+    base_url = _public_base_url(req)
+
+    if "application/json" in content_type:
+        try:
+            body = await req.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body.")
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="JSON body must be an object.")
+        try:
+            case_id = validate_case_id(str(body.get("uuid", "")))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        text = str(body.get("text") or "").strip()
+        if not text:
+            raise HTTPException(
+                status_code=400,
+                detail="JSON mode requires non-empty text. For audio use multipart.",
+            )
+        if body.get("audio") not in (None, "", False):
+            raise HTTPException(
+                status_code=400,
+                detail="Send text OR audio — not both. Use multipart for audio-only.",
+            )
+        return _enqueue_case_text(case_id, text, base_url)
+
+    try:
+        form = await req.form()
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Expected application/json or multipart/form-data.",
+        ) from None
+
+    try:
+        case_id = validate_case_id(str(form.get("uuid") or ""))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    text = str(form.get("text") or "").strip()
+    upload = form.get("file")
+    raw = b""
+    filename: str | None = None
+    file_content_type: str | None = None
+    if upload is not None and hasattr(upload, "read"):
+        raw = await upload.read()
+        filename = getattr(upload, "filename", None)
+        file_content_type = getattr(upload, "content_type", None)
+    has_file = bool(raw)
+
+    if text and has_file:
+        raise HTTPException(
+            status_code=400,
+            detail="Send text OR audio file — not both (server capacity).",
+        )
+    if text:
+        return _enqueue_case_text(case_id, text, base_url)
+    if has_file:
+        return _enqueue_case_audio(
+            case_id,
+            raw,
+            filename,
+            file_content_type,
+            base_url,
+        )
+    raise HTTPException(
+        status_code=400,
+        detail="Provide non-empty text, or an audio file (not both, not neither).",
+    )
+
+
+@app.post(
+    "/api/ask",
+    summary="Alias of POST /api/cases for text JSON {uuid, text}",
+)
+async def api_ask(body: CaseTextRequest, req: Request):
+    try:
+        case_id = validate_case_id(body.uuid)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return _enqueue_case_text(case_id, body.text, _public_base_url(req))
+
+
+@app.get(
+    "/api/cases/{case_id}",
+    summary="Get case status / audio_url by external uuid",
+)
+async def get_case(case_id: str):
+    try:
+        case_id = validate_case_id(case_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    meta = _get_case(case_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Case not found.")
+    return _case_public_view(meta)
+
+
+@app.get(
+    "/api/get-msg",
+    summary="Alias of GET /api/cases/{uuid} (?uuid=)",
+)
+async def get_msg(uuid: str):
+    try:
+        case_id = validate_case_id(uuid)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    meta = _get_case(case_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Case not found.")
+    return _case_public_view(meta)
 
 
 @app.get(
