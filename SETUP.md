@@ -81,8 +81,10 @@ docker compose logs -f backend
 
 مستندات تعاملی: **http://SERVER_IP:8000/docs**
 
-قرارداد سرور خارجی (uuid + متن یا ویس + S3): فایل **[COLLABORATOR_API.md](COLLABORATOR_API.md)**  
-خلاصه: `POST /api/cases` یا `/api/ask` → poll `GET /api/cases/{uuid}` یا `/api/get-msg?uuid=` → دانلود `audio_url`.
+قرارداد سرور خارجی / HakimAI: فایل **[COLLABORATOR_API.md](COLLABORATOR_API.md)**  
+
+- **TTS:** `POST /api/ask` → HakimAI فایل MP3 را مستقیم از S3 پول می‌کند (`s3_key`)  
+- **STT:** `POST /api/cases` + فایل → متن با `GET /api/get-msg?uuid=`
 
 ### جریان async (پیشنهادی)
 

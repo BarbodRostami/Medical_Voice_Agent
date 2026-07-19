@@ -342,7 +342,7 @@
               "raw": "{\n  \"uuid\": \"{{case_uuid}}\",\n  \"text\": \"تفسیر بالینی بیمار پایدار است.\"\n}"
             },
             "url": "{{base_url}}/api/ask",
-            "description": "Text-only case → TTS → S3 cases/{uuid}/output/reply.mp3.\n\nAlso available as POST /api/cases with same JSON."
+            "description": "TTS: text → MP3 on S3. Response includes s3_key for HakimAI to poll S3 directly (like voice_storage.py).\n\nAlso POST /api/cases with same JSON."
           },
           "response": []
         },
@@ -376,7 +376,7 @@
               ]
             },
             "url": "{{base_url}}/api/cases",
-            "description": "Voice-only (no text). STT → RAG → TTS. Do not send text together with file."
+            "description": "STT: upload audio only. Then poll GET /api/get-msg for text (transcript/answer). No TTS on this path."
           },
           "response": []
         },
@@ -400,7 +400,7 @@
               { "key": "X-API-Key", "value": "{{api_key}}" }
             ],
             "url": "{{base_url}}/api/get-msg?uuid={{case_uuid}}",
-            "description": "Same as Get Case Status — matches external-server naming."
+            "description": "STT result: use text/answer when status=ready. TTS mode: prefer S3 poll with s3_key instead of downloading via API."
           },
           "response": []
         }

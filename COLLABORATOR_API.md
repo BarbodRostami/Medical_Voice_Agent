@@ -1,74 +1,64 @@
-# Collaborator API (External Server ↔ Voice Server)
-
-Use this when the company **external server** talks to the **voice server**.
-Cases are keyed by **your** `uuid`. Audio lands in Parmin S3; you usually poll our API and download via `audio_url`.
+# Collaborator API — HakimAI ↔ Voice Server
 
 Base URL (example): `http://192.168.1.15:8000`
 
-Auth: send header on every call except health and audio playback:
-
 ```http
-X-API-Key: <value from voice-server .env API_KEY>
+X-API-Key: <from voice-server .env API_KEY>
 ```
+
+(If `API_KEY` is unset on the voice server, the header is optional.)
+
+**Rule:** send **either** text **or** audio — never both.
 
 ---
 
-## Rules
+## Mode A — Text → Voice (TTS)
 
-1. Send **either** text **or** audio — never both (server capacity).
-2. Creating a case is async: you get `queued` immediately.
-3. Poll until `status` is `ready` or `failed`.
-4. Download MP3 from `audio_url` (public proxy; no API key required for GET audio).
+HakimAI triggers TTS; **downloads the MP3 from S3 itself** (not from the voice API).
 
-S3 layout (Parmin bucket, managed by voice server):
-
-```text
-cases/{uuid}/meta.json
-cases/{uuid}/input/text.json          # text mode
-cases/{uuid}/input/audio.<ext>        # audio mode
-cases/{uuid}/output/reply.mp3         # final file
-```
-
-You do **not** need S3 credentials; use the HTTP API + `audio_url`.
-
----
-
-## 1) Text → voice
-
-`POST /api/cases` or alias `POST /api/ask`
+### 1) Start job
 
 ```http
 POST /api/ask
 Content-Type: application/json
 X-API-Key: ...
 
-{"uuid": "ext-1001", "text": "تفسیر بالینی بیمار پایدار است."}
+{"uuid": "ext-1001", "text": "متن فارسی اینجا"}
 ```
 
-Response:
+Immediate response:
 
 ```json
 {
   "uuid": "ext-1001",
   "status": "queued",
   "mode": "text",
-  "message": "..."
+  "s3_endpoint": "https://sas.amin.parminstorage.ir",
+  "s3_bucket": "voiceai",
+  "s3_key": "cases/ext-1001/output/reply.mp3",
+  "s3_key_legacy": "audio/ext-1001.mp3"
 }
 ```
 
-Pipeline: TTS only → upload `cases/{uuid}/output/reply.mp3`.
+### 2) HakimAI polls S3 (like `voice_storage.py`)
+
+Voice server uploads **MP3** to both keys when ready:
+
+| Key | Purpose |
+|-----|---------|
+| `cases/{uuid}/output/reply.mp3` | canonical (`s3_key`) |
+| `audio/{uuid}.mp3` | legacy / voice_storage-style (`s3_key_legacy`) |
+
+HakimAI: `HeadObject` / `GetObject` on that key until the file exists, then download.  
+Do **not** pull audio bytes through the voice API for this mode.
+
+S3 credentials for HakimAI: same Parmin bucket (`LIARA_*` / `S3_*` equivalent) — separate from `X-API-Key`.
 
 ---
 
-## 2) Voice only (empty text)
+## Mode B — Voice → Text (STT)
 
-`POST /api/cases` as `multipart/form-data`:
-
-| field | value |
-|-------|--------|
-| `uuid` | your case id |
-| `file` | audio (wav/mp3/ogg/m4a) |
-| `text` | omit or empty |
+### 1) Upload audio to voice server
 
 ```bash
 curl -X POST "http://192.168.1.15:8000/api/cases" \
@@ -77,47 +67,45 @@ curl -X POST "http://192.168.1.15:8000/api/cases" \
   -F "file=@question.wav"
 ```
 
-Pipeline: STT → RAG → TTS → same output key (heavier; keep traffic modest).
+Immediate: `{"uuid","status":"queued","mode":"audio"}`
 
----
+Pipeline on voice server: STT → RAG → Persian text (**no TTS** — lighter load).
 
-## 3) Get result by uuid
+### 2) HakimAI gets text via API
 
 ```http
-GET /api/cases/ext-1001
+GET /api/get-msg?uuid=ext-1002
 X-API-Key: ...
 ```
 
-Alias:
-
-```http
-GET /api/get-msg?uuid=ext-1001
-X-API-Key: ...
-```
+(or `GET /api/cases/ext-1002`)
 
 When ready:
 
 ```json
 {
-  "uuid": "ext-1001",
+  "uuid": "ext-1002",
   "status": "ready",
-  "mode": "text",
-  "audio_url": "http://192.168.1.15:8000/voice/audio/cases/ext-1001/output/reply.mp3",
-  "transcript": null,
-  "answer": null,
+  "mode": "audio",
+  "text": "پاسخ فارسی برای نمایش",
+  "transcript": "متن تشخیص‌داده‌شده از ویس کاربر",
+  "answer": "پاسخ فارسی برای نمایش",
   "error": null
 }
 ```
 
-Statuses: `queued` | `processing` | `ready` | `failed`
+HakimAI stores/displays `text` (or `answer`). Poll until `status` is `ready` or `failed`.
 
 ---
 
-## What to give the external-server team
+## Status values
 
-1. Base URL: `PUBLIC_API_URL` (e.g. `http://192.168.1.15:8000`)
-2. Shared `API_KEY` (rotate if leaked)
-3. This document
-4. OpenAPI: `http://192.168.1.15:8000/docs` (also requires API key when enabled)
+`queued` | `processing` | `ready` | `failed`
 
-They should **not** need `LIARA_*` / S3 keys for normal integration.
+---
+
+## What to share with HakimAI
+
+1. Voice API base URL + `API_KEY`
+2. S3 endpoint / bucket / access+secret (for TTS poll/download only)
+3. This document — keys: `cases/{uuid}/output/reply.mp3` and `audio/{uuid}.mp3`

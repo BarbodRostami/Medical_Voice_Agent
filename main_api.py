@@ -25,12 +25,15 @@ from pydantic import BaseModel, Field
 
 from api_auth import configured_api_key, enforce_api_key
 from case_store import (
+    legacy_audio_key,
     load_meta,
     new_meta,
     output_audio_key,
+    s3_locator,
     save_input_audio,
     save_input_text,
     save_meta,
+    save_output_text,
     validate_case_id,
 )
 from llm_output import clean_llm_output
@@ -708,29 +711,33 @@ def _worker_voice(job_id: str, full_text: str, base_url: str) -> None:
 
 
 def _worker_case_text(case_id: str, text: str, base_url: str) -> None:
-    """Text-only case: TTS → S3 cases/{uuid}/output/reply.mp3 (no RAG — light path)."""
+    """Text/TTS case: MP3 → S3 for HakimAI to poll (cases/.../reply.mp3 + audio/{uuid}.mp3)."""
     try:
         _patch_case(case_id, status="processing", message="در حال تبدیل متن به صدا...")
         audio_bytes = persian_to_voice(text)
         out_key = output_audio_key(case_id)
-        _patch_case(case_id, message="در حال آپلود فایل صوتی...")
+        legacy_key = legacy_audio_key(case_id)
+        _patch_case(case_id, message="در حال آپلود فایل صوتی روی S3...")
         file_key = upload_mp3_to_key_with_timeout(audio_bytes, out_key)
         if not file_key:
             raise RuntimeError("S3 upload failed or timed out")
+        # Same bytes under legacy key so existing voice_storage pollers keep working.
+        upload_mp3_to_key_with_timeout(audio_bytes, legacy_key)
         audio_url = build_audio_proxy_url(base_url, file_key)
         _patch_case(
             case_id,
             status="ready",
-            message="تکمیل شد.",
+            message="تکمیل شد — فایل روی S3 آماده دانلود است.",
             audio_url=audio_url,
             error=None,
+            **s3_locator(case_id),
         )
     except Exception as e:
         _patch_case(case_id, status="failed", message="خطا در پردازش.", error=str(e))
 
 
 def _worker_case_audio(case_id: str, audio_path: str, base_url: str) -> None:
-    """Voice-only case: STT → RAG → TTS → S3 cases/{uuid}/output/reply.mp3."""
+    """Voice/STT case: STT → RAG → text for GET /api/get-msg (no TTS — lighter on server)."""
     try:
         _patch_case(case_id, status="processing", message="در حال تبدیل صدا به متن...")
         whisper = _get_whisper()
@@ -774,22 +781,27 @@ def _worker_case_audio(case_id: str, audio_path: str, base_url: str) -> None:
             )
             return
 
-        _patch_case(case_id, message="در حال تبدیل متن به صدا...")
-        persian_answer, audio_bytes = _answer_to_persian_voice(answer)
-        out_key = output_audio_key(case_id)
-        _patch_case(case_id, message="در حال آپلود فایل صوتی...")
-        file_key = upload_mp3_to_key_with_timeout(audio_bytes, out_key)
-        if not file_key:
-            raise RuntimeError("S3 upload failed or timed out")
-        audio_url = build_audio_proxy_url(base_url, file_key)
+        # HakimAI wants text via get-msg — translate to Persian for display.
+        _patch_case(case_id, message="در حال آماده‌سازی متن فارسی...")
+        persian_answer = translate_to_persian(answer)
+        if not persian_answer or len(persian_answer.strip()) < 3:
+            persian_answer = answer
+
+        try:
+            save_output_text(case_id, transcript=persian_query, answer=persian_answer)
+        except Exception as e:
+            print(f"Warning: could not store case output text: {e}")
+
         _patch_case(
             case_id,
             status="ready",
-            message="تکمیل شد.",
+            message="تکمیل شد — متن آماده است (GET /api/get-msg).",
             transcript=persian_query,
             answer=persian_answer,
-            audio_url=audio_url,
+            text=persian_answer,
+            audio_url=None,
             error=None,
+            **s3_locator(case_id),
         )
     except Exception as e:
         _patch_case(case_id, status="failed", message="خطا در پردازش.", error=str(e))
@@ -811,11 +823,16 @@ def _enqueue_case_text(case_id: str, text: str, base_url: str) -> dict:
     meta = new_meta(case_id, mode="text")
     _set_case(meta)
     _job_executor.submit(_worker_case_text, case_id, cleaned, base_url)
+    locator = s3_locator(case_id)
     return {
         "uuid": case_id,
         "status": "queued",
         "mode": "text",
-        "message": "پذیرفته شد — وضعیت را با GET /api/cases/{uuid} یا GET /api/get-msg?uuid=... بگیرید.",
+        "message": (
+            "پذیرفته شد — HakimAI باید مستقیماً S3 را برای s3_key پول کند "
+            "(نه دانلود بایت از API ویس)."
+        ),
+        **locator,
     }
 
 
@@ -845,19 +862,28 @@ def _enqueue_case_audio(
         "uuid": case_id,
         "status": "queued",
         "mode": "audio",
-        "message": "فایل صوتی دریافت شد — وضعیت را با GET /api/cases/{uuid} بگیرید.",
+        "message": (
+            "فایل صوتی دریافت شد — متن را با GET /api/get-msg?uuid=... بگیرید "
+            "(فیلد text / answer / transcript)."
+        ),
     }
 
 
 def _case_public_view(meta: dict) -> dict:
+    text = meta.get("text") or meta.get("answer") or meta.get("transcript")
     return {
         "uuid": meta.get("uuid"),
         "status": meta.get("status"),
         "mode": meta.get("mode"),
         "message": meta.get("message"),
-        "audio_url": meta.get("audio_url"),
+        "text": text,
         "transcript": meta.get("transcript"),
         "answer": meta.get("answer"),
+        "audio_url": meta.get("audio_url"),
+        "s3_endpoint": meta.get("s3_endpoint"),
+        "s3_bucket": meta.get("s3_bucket"),
+        "s3_key": meta.get("s3_key") or meta.get("output_key"),
+        "s3_key_legacy": meta.get("s3_key_legacy"),
         "error": meta.get("error"),
         "created_at": meta.get("created_at"),
         "updated_at": meta.get("updated_at"),
@@ -988,14 +1014,12 @@ async def list_jobs():
 )
 async def create_case(req: Request):
     """
-    External-server contract (exactly one input mode — not both):
+    External-server / HakimAI contract (exactly one input mode — not both):
 
-    - **Text:** JSON ``{\"uuid\",\"text\"}`` or multipart fields ``uuid`` + ``text``
-      → TTS only → ``cases/{uuid}/output/reply.mp3``
-    - **Audio:** multipart ``uuid`` + ``file`` (text empty/omitted)
-      → STT → RAG → TTS → same output key
-
-    Poll ``GET /api/cases/{uuid}`` (or ``GET /api/get-msg?uuid=``) for ``audio_url``.
+    - **TTS (text):** JSON ``{\"uuid\",\"text\"}`` → we upload MP3 to S3;
+      HakimAI polls ``s3_key`` directly (same idea as voice_storage.py).
+    - **STT (audio):** multipart ``uuid`` + ``file`` → STT+RAG text;
+      HakimAI reads ``text`` via ``GET /api/get-msg?uuid=``.
     """
     content_type = (req.headers.get("content-type") or "").lower()
     base_url = _public_base_url(req)

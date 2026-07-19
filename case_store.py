@@ -1,16 +1,19 @@
 """Collaborator case layout on S3-compatible storage.
 
-External server owns the case ``uuid``. Voice server stores inputs/outputs under::
+HakimAI / external server owns the case ``uuid``. Voice server writes::
 
     cases/{uuid}/meta.json
-    cases/{uuid}/input/text.json          # text-only mode
-    cases/{uuid}/input/audio.<ext>        # voice-only mode
-    cases/{uuid}/output/reply.mp3         # final downloadable audio
+    cases/{uuid}/input/text.json          # text (TTS) mode
+    cases/{uuid}/input/audio.<ext>        # audio (STT) mode
+    cases/{uuid}/output/reply.mp3         # TTS output (HakimAI polls this)
+    audio/{uuid}.mp3                      # same MP3 — legacy voice_storage-style key
 
-S3 holds files; ``meta.json`` is the durable status record the external server polls.
+TTS: HakimAI polls S3 for the MP3 (does not pull bytes from the voice API).
+STT: HakimAI reads text via GET /api/get-msg (no MP3 required).
 """
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -53,7 +56,31 @@ def input_audio_key(case_id: str, extension: str) -> str:
 
 
 def output_audio_key(case_id: str) -> str:
+    """Canonical object key HakimAI should poll after TTS."""
     return f"cases/{case_id}/output/reply.mp3"
+
+
+def legacy_audio_key(case_id: str) -> str:
+    """Compatibility key for existing voice_storage-style pollers: audio/{uuid}.mp3."""
+    return f"audio/{case_id}.mp3"
+
+
+def s3_bucket() -> str:
+    return os.getenv("LIARA_BUCKET", "voiceai")
+
+
+def s3_endpoint() -> str:
+    return (os.getenv("LIARA_ENDPOINT") or "").rstrip("/")
+
+
+def s3_locator(case_id: str) -> dict[str, str]:
+    """Fields HakimAI needs to poll/download TTS audio without hitting the voice API."""
+    return {
+        "s3_endpoint": s3_endpoint(),
+        "s3_bucket": s3_bucket(),
+        "s3_key": output_audio_key(case_id),
+        "s3_key_legacy": legacy_audio_key(case_id),
+    }
 
 
 def utc_now_iso() -> str:
@@ -67,7 +94,7 @@ def new_meta(
     status: CaseStatus = "queued",
     message: str = "در صف انتظار...",
 ) -> dict[str, Any]:
-    return {
+    meta: dict[str, Any] = {
         "uuid": case_id,
         "mode": mode,
         "status": status,
@@ -76,10 +103,13 @@ def new_meta(
         "output_key": output_audio_key(case_id),
         "transcript": None,
         "answer": None,
+        "text": None,
         "error": None,
         "created_at": utc_now_iso(),
         "updated_at": utc_now_iso(),
     }
+    meta.update(s3_locator(case_id))
+    return meta
 
 
 def save_meta(meta: dict[str, Any]) -> None:
@@ -103,3 +133,16 @@ def save_input_audio(case_id: str, audio_bytes: bytes, extension: str) -> str:
     key = input_audio_key(case_id, extension)
     put_storage_object(key, audio_bytes, "application/octet-stream")
     return key
+
+
+def save_output_text(case_id: str, *, transcript: str | None, answer: str | None) -> None:
+    """Persist STT/RAG text so HakimAI can rely on S3 meta even after API restart."""
+    put_json_to_storage(
+        f"cases/{case_id}/output/text.json",
+        {
+            "uuid": case_id,
+            "transcript": transcript,
+            "answer": answer,
+            "text": answer or transcript,
+        },
+    )
