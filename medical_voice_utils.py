@@ -214,20 +214,46 @@ def persian_to_voice(persian_text: str, timeout: int = 60) -> bytes:
 # ─── Object Storage (S3-compatible) ──────────────────────────────────────────
 
 def _get_s3_client() -> _S3Client:
-    """Return a cached S3 client (lazy singleton)."""
+    """Return a cached S3 client (lazy singleton).
+
+    Parmin must be reached **directly from this machine** — never via HTTP(S) proxy
+    (proxy causes SSL/read timeouts to ``sas.amin.parminstorage.ir``).
+    """
     global _s3_client
     if _s3_client is None:
+        # Ensure env proxy vars cannot redirect Parmin traffic for this process.
+        endpoint = (os.getenv("LIARA_ENDPOINT") or "").strip()
+        host = ""
+        if endpoint:
+            from urllib.parse import urlparse
+
+            host = urlparse(endpoint).hostname or ""
+        existing = os.getenv("NO_PROXY") or os.getenv("no_proxy") or ""
+        bypass = {
+            "localhost",
+            "127.0.0.1",
+            "sas.amin.parminstorage.ir",
+            "parminstorage.ir",
+        }
+        if host:
+            bypass.add(host)
+        merged = ",".join(sorted({*existing.split(","), *bypass} - {""}))
+        os.environ["NO_PROXY"] = merged
+        os.environ["no_proxy"] = merged
+
         _s3_client = boto3.client(
             "s3",
-            endpoint_url=os.getenv("LIARA_ENDPOINT"),
+            endpoint_url=endpoint or None,
             aws_access_key_id=os.getenv("LIARA_ACCESS_KEY"),
             aws_secret_access_key=os.getenv("LIARA_SECRET_KEY"),
             region_name="us-east-1",
             config=_BotocoreConfig(
                 signature_version="s3v4",
-                connect_timeout=15,
+                connect_timeout=20,
                 read_timeout=90,
                 retries={"max_attempts": 4, "mode": "standard"},
+                # Explicit empty dict = do not use system/env HTTP(S)_PROXY.
+                proxies={},
             ),
         )
     return _s3_client
