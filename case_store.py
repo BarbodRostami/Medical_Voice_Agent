@@ -1,22 +1,28 @@
 """Collaborator case layout on S3-compatible storage.
 
-HakimAI / external server owns the case ``uuid``. Voice server writes::
+HakimAI / external server owns the case ``uuid``.
+
+TTS output key (HakimAI polls this)::
+
+    {YYYY-MM-DD}/{uuid}.mp3
+
+Date is Asia/Tehran calendar day when the job is created.
+
+Internal metadata (optional, voice-server only)::
 
     cases/{uuid}/meta.json
-    cases/{uuid}/input/text.json          # text (TTS) mode
-    cases/{uuid}/input/audio.<ext>        # audio (STT) mode
-    cases/{uuid}/output/reply.mp3         # TTS output (HakimAI polls this)
-    audio/{uuid}.mp3                      # same MP3 — legacy voice_storage-style key
+    cases/{uuid}/input/...
+    cases/{uuid}/output/text.json   # STT text backup
 
-TTS: HakimAI polls S3 for the MP3 (does not pull bytes from the voice API).
+TTS: HakimAI polls S3 for ``{date}/{uuid}.mp3`` — do not expose bucket/key in API JSON.
 STT: HakimAI reads text via GET /api/get-msg (no MP3 required).
 """
 from __future__ import annotations
 
-import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from medical_voice_utils import (
     get_json_from_storage,
@@ -27,7 +33,9 @@ from medical_voice_utils import (
 
 CaseStatus = Literal["queued", "processing", "ready", "failed"]
 
+_TEHRAN = ZoneInfo("Asia/Tehran")
 _CASE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}/")
 
 
 def validate_case_id(raw: str) -> str:
@@ -40,6 +48,16 @@ def validate_case_id(raw: str) -> str:
             "Invalid uuid: use letters, digits, dot, underscore, or hyphen (max 128)."
         )
     return case_id
+
+
+def tehran_date_str(when: datetime | None = None) -> str:
+    """Return YYYY-MM-DD in Asia/Tehran."""
+    dt = when or datetime.now(_TEHRAN)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_TEHRAN)
+    else:
+        dt = dt.astimezone(_TEHRAN)
+    return dt.strftime("%Y-%m-%d")
 
 
 def meta_key(case_id: str) -> str:
@@ -55,36 +73,14 @@ def input_audio_key(case_id: str, extension: str) -> str:
     return f"cases/{case_id}/input/audio{ext}"
 
 
-def output_audio_key(case_id: str) -> str:
-    """Canonical object key HakimAI should poll after TTS."""
-    return f"cases/{case_id}/output/reply.mp3"
-
-
-def legacy_audio_key(case_id: str) -> str:
-    """Compatibility key for existing voice_storage-style pollers: audio/{uuid}.mp3."""
-    return f"audio/{case_id}.mp3"
-
-
-def s3_bucket() -> str:
-    return os.getenv("LIARA_BUCKET", "voiceai")
-
-
-def s3_endpoint() -> str:
-    return (os.getenv("LIARA_ENDPOINT") or "").rstrip("/")
-
-
-def s3_locator(case_id: str) -> dict[str, str]:
-    """Fields HakimAI needs to poll/download TTS audio without hitting the voice API."""
-    return {
-        "s3_endpoint": s3_endpoint(),
-        "s3_bucket": s3_bucket(),
-        "s3_key": output_audio_key(case_id),
-        "s3_key_legacy": legacy_audio_key(case_id),
-    }
+def output_audio_key(case_id: str, day: str | None = None) -> str:
+    """Canonical MP3 key HakimAI polls: ``{YYYY-MM-DD}/{uuid}.mp3``."""
+    date_part = day or tehran_date_str()
+    return f"{date_part}/{case_id}.mp3"
 
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.now(_TEHRAN).astimezone().replace(microsecond=0).isoformat()
 
 
 def new_meta(
@@ -94,13 +90,15 @@ def new_meta(
     status: CaseStatus = "queued",
     message: str = "در صف انتظار...",
 ) -> dict[str, Any]:
-    meta: dict[str, Any] = {
+    day = tehran_date_str()
+    return {
         "uuid": case_id,
         "mode": mode,
         "status": status,
         "message": message,
         "audio_url": None,
-        "output_key": output_audio_key(case_id),
+        "output_key": output_audio_key(case_id, day),
+        "day": day,
         "transcript": None,
         "answer": None,
         "text": None,
@@ -108,8 +106,6 @@ def new_meta(
         "created_at": utc_now_iso(),
         "updated_at": utc_now_iso(),
     }
-    meta.update(s3_locator(case_id))
-    return meta
 
 
 def save_meta(meta: dict[str, Any]) -> None:
@@ -136,7 +132,7 @@ def save_input_audio(case_id: str, audio_bytes: bytes, extension: str) -> str:
 
 
 def save_output_text(case_id: str, *, transcript: str | None, answer: str | None) -> None:
-    """Persist STT/RAG text so HakimAI can rely on S3 meta even after API restart."""
+    """Persist STT/RAG text backup under cases/ (internal)."""
     put_json_to_storage(
         f"cases/{case_id}/output/text.json",
         {

@@ -25,11 +25,9 @@ from pydantic import BaseModel, Field
 
 from api_auth import configured_api_key, enforce_api_key
 from case_store import (
-    legacy_audio_key,
     load_meta,
     new_meta,
     output_audio_key,
-    s3_locator,
     save_input_audio,
     save_input_text,
     save_meta,
@@ -53,10 +51,10 @@ from stt_utils import detect_audio_extension, transcribe_medical_speech
 app = FastAPI(title="Medical RAG API")
 app.middleware("http")(enforce_api_key)
 
-PERSIST_DIRECTORY = "db"
+PERSIST_DIRECTORY = "db"  
 # Must match the model used in ingestion.py (MedCPT — a medical-domain encoder)
 EMBEDDING_MODEL = "ncbi/MedCPT-Article-Encoder"
-LLM_MODEL = "biomistral:latest"
+LLM_MODEL = "biomistral:latest" 
 RETRIEVE_K = 5       # final number of chunks returned
 FETCH_K = 20         # candidates for MMR to diversify from
 
@@ -138,6 +136,11 @@ def _update_job(job_id: str, **kwargs) -> None:
 def _set_case(meta: dict) -> None:
     with _cases_lock:
         _cases[meta["uuid"]] = meta
+    # Persist meta in background so enqueue / status updates stay fast.
+    _job_executor.submit(_persist_case_meta_safe, dict(meta))
+
+
+def _persist_case_meta_safe(meta: dict) -> None:
     try:
         save_meta(meta)
     except Exception as e:
@@ -152,10 +155,7 @@ def _patch_case(case_id: str, **kwargs) -> None:
         current.update(kwargs)
         _cases[case_id] = current
         snapshot = dict(current)
-    try:
-        save_meta(snapshot)
-    except Exception as e:
-        print(f"Warning: could not persist case meta to S3: {e}")
+    _job_executor.submit(_persist_case_meta_safe, snapshot)
 
 
 def _get_case(case_id: str) -> dict | None:
@@ -194,12 +194,12 @@ print("Loading Vector Database and Models...")
 try:
     # Use MedCPT — a medical-domain encoder that matches how the DB was indexed
     embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
-
+    
     if not os.path.exists(PERSIST_DIRECTORY):
         print(f"Warning: Folder '{PERSIST_DIRECTORY}' not found!")
 
     db = Chroma(persist_directory=PERSIST_DIRECTORY, embedding_function=embeddings)
-
+    
     # ── Build Hybrid Retriever ──────────────────────────────────────────────
     # 1. Load all documents from ChromaDB for BM25 keyword index
     raw = db._collection.get(include=["documents", "metadatas"])
@@ -379,7 +379,7 @@ async def chat_stream(request: QuestionRequest):
     if db is None or llm is None or bm25_retriever is None:
         raise HTTPException(status_code=500, detail="System not initialized.")
 
-    query = request.query
+        query = request.query
     key = _cache_key(query)
     cached = _get_cache(key)
 
@@ -711,28 +711,34 @@ def _worker_voice(job_id: str, full_text: str, base_url: str) -> None:
 
 
 def _worker_case_text(case_id: str, text: str, base_url: str) -> None:
-    """Text/TTS case: MP3 → S3 for HakimAI to poll (cases/.../reply.mp3 + audio/{uuid}.mp3)."""
+    """Text/TTS case: MP3 → S3 as ``{YYYY-MM-DD}/{uuid}.mp3`` for HakimAI poll."""
     try:
         _patch_case(case_id, status="processing", message="در حال تبدیل متن به صدا...")
         audio_bytes = persian_to_voice(text)
-        out_key = output_audio_key(case_id)
-        legacy_key = legacy_audio_key(case_id)
-        _patch_case(case_id, message="در حال آپلود فایل صوتی روی S3...")
-        file_key = upload_mp3_to_key_with_timeout(audio_bytes, out_key)
+        with _cases_lock:
+            day = (_cases.get(case_id) or {}).get("day")
+        out_key = output_audio_key(case_id, day)
+        _patch_case(
+            case_id,
+            message="در حال آپلود فایل صوتی روی S3...",
+            output_key=out_key,
+        )
+        print(f"[case {case_id}] uploading MP3 -> {out_key} ({len(audio_bytes)} bytes)")
+        file_key = upload_mp3_to_key_with_timeout(audio_bytes, out_key, timeout=90)
         if not file_key:
-            raise RuntimeError("S3 upload failed or timed out")
-        # Same bytes under legacy key so existing voice_storage pollers keep working.
-        upload_mp3_to_key_with_timeout(audio_bytes, legacy_key)
+            raise RuntimeError(f"S3 upload failed or timed out for key={out_key}")
+        print(f"[case {case_id}] S3 upload OK: {file_key}")
         audio_url = build_audio_proxy_url(base_url, file_key)
         _patch_case(
             case_id,
             status="ready",
-            message="تکمیل شد — فایل روی S3 آماده دانلود است.",
+            message="تکمیل شد — فایل روی S3 آماده است.",
             audio_url=audio_url,
+            output_key=file_key,
             error=None,
-            **s3_locator(case_id),
         )
     except Exception as e:
+        print(f"[case {case_id}] FAILED: {e}")
         _patch_case(case_id, status="failed", message="خطا در پردازش.", error=str(e))
 
 
@@ -801,9 +807,9 @@ def _worker_case_audio(case_id: str, audio_path: str, base_url: str) -> None:
             text=persian_answer,
             audio_url=None,
             error=None,
-            **s3_locator(case_id),
         )
     except Exception as e:
+        print(f"[case {case_id}] FAILED: {e}")
         _patch_case(case_id, status="failed", message="خطا در پردازش.", error=str(e))
     finally:
         try:
@@ -816,24 +822,26 @@ def _enqueue_case_text(case_id: str, text: str, base_url: str) -> dict:
     cleaned = text.strip()
     if not cleaned:
         raise HTTPException(status_code=400, detail="text must not be empty.")
-    try:
-        save_input_text(case_id, cleaned)
-    except Exception as e:
-        print(f"Warning: could not store case input text: {e}")
+    _job_executor.submit(_save_input_text_safe, case_id, cleaned)
     meta = new_meta(case_id, mode="text")
     _set_case(meta)
     _job_executor.submit(_worker_case_text, case_id, cleaned, base_url)
-    locator = s3_locator(case_id)
     return {
         "uuid": case_id,
         "status": "queued",
         "mode": "text",
         "message": (
-            "پذیرفته شد — HakimAI باید مستقیماً S3 را برای s3_key پول کند "
-            "(نه دانلود بایت از API ویس)."
+            "پذیرفته شد — بعد از ready فایل را از S3 با کلید "
+            f"{{YYYY-MM-DD}}/{case_id}.mp3 بگیرید (تاریخ تهران)."
         ),
-        **locator,
     }
+
+
+def _save_input_text_safe(case_id: str, text: str) -> None:
+    try:
+        save_input_text(case_id, text)
+    except Exception as e:
+        print(f"Warning: could not store case input text: {e}")
 
 
 def _enqueue_case_audio(
@@ -848,10 +856,7 @@ def _enqueue_case_audio(
     if not raw:
         raise HTTPException(status_code=400, detail="Empty audio upload.")
     suffix = detect_audio_extension(raw, filename, content_type)
-    try:
-        save_input_audio(case_id, raw, suffix)
-    except Exception as e:
-        print(f"Warning: could not store case input audio: {e}")
+    _job_executor.submit(_save_input_audio_safe, case_id, raw, suffix)
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(raw)
         tmp_path = tmp.name
@@ -869,7 +874,15 @@ def _enqueue_case_audio(
     }
 
 
+def _save_input_audio_safe(case_id: str, raw: bytes, suffix: str) -> None:
+    try:
+        save_input_audio(case_id, raw, suffix)
+    except Exception as e:
+        print(f"Warning: could not store case input audio: {e}")
+
+
 def _case_public_view(meta: dict) -> dict:
+    """Public JSON for HakimAI — no s3_bucket / s3_key fields."""
     text = meta.get("text") or meta.get("answer") or meta.get("transcript")
     return {
         "uuid": meta.get("uuid"),
@@ -880,10 +893,6 @@ def _case_public_view(meta: dict) -> dict:
         "transcript": meta.get("transcript"),
         "answer": meta.get("answer"),
         "audio_url": meta.get("audio_url"),
-        "s3_endpoint": meta.get("s3_endpoint"),
-        "s3_bucket": meta.get("s3_bucket"),
-        "s3_key": meta.get("s3_key") or meta.get("output_key"),
-        "s3_key_legacy": meta.get("s3_key_legacy"),
         "error": meta.get("error"),
         "created_at": meta.get("created_at"),
         "updated_at": meta.get("updated_at"),
@@ -1016,8 +1025,9 @@ async def create_case(req: Request):
     """
     External-server / HakimAI contract (exactly one input mode — not both):
 
-    - **TTS (text):** JSON ``{\"uuid\",\"text\"}`` → we upload MP3 to S3;
-      HakimAI polls ``s3_key`` directly (same idea as voice_storage.py).
+    - **TTS (text):** JSON ``{\"uuid\",\"text\"}`` → we upload MP3 to
+      ``{YYYY-MM-DD}/{uuid}.mp3`` (Tehran date). HakimAI polls that key on S3.
+      API responses do not expose s3_bucket / s3_key.
     - **STT (audio):** multipart ``uuid`` + ``file`` → STT+RAG text;
       HakimAI reads ``text`` via ``GET /api/get-msg?uuid=``.
     """

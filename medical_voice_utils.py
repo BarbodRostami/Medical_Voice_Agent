@@ -225,9 +225,9 @@ def _get_s3_client() -> _S3Client:
             region_name="us-east-1",
             config=_BotocoreConfig(
                 signature_version="s3v4",
-                connect_timeout=10,
-                read_timeout=30,
-                retries={"max_attempts": 2},
+                connect_timeout=15,
+                read_timeout=90,
+                retries={"max_attempts": 4, "mode": "standard"},
             ),
         )
     return _s3_client
@@ -236,16 +236,20 @@ def _get_s3_client() -> _S3Client:
 def resolve_storage_key(public_key: str) -> str:
     """Map proxy URL segment to full S3 object key.
 
-    Legacy clips live under ``audio/``. Collaborator cases use ``cases/{uuid}/...``.
+    - ``audio/...`` legacy clips
+    - ``cases/...`` internal case metadata
+    - ``YYYY-MM-DD/{uuid}.mp3`` HakimAI TTS poll keys
     """
     key = public_key.lstrip("/")
     if key.startswith(("audio/", "cases/")):
+        return key
+    if re.match(r"^\d{4}-\d{2}-\d{2}/", key):
         return key
     return f"audio/{key}"
 
 
 def build_audio_proxy_url(base_url: str, public_key: str) -> str:
-    """Build client-facing URL: .../voice/audio/{uuid}.mp3 (no duplicate audio/ prefix)."""
+    """Build client-facing URL: .../voice/audio/{key} (supports dated keys)."""
     base = base_url.rstrip("/") + "/"
     return f"{base}voice/audio/{public_key.lstrip('/')}"
 
@@ -255,7 +259,7 @@ def _bucket_name() -> str:
 
 
 def put_storage_object(key: str, body: bytes, content_type: str) -> str:
-    """Upload bytes to a full storage key (``audio/...`` or ``cases/...``)."""
+    """Upload bytes to a full storage key."""
     storage_key = resolve_storage_key(key)
     try:
         s3 = _get_s3_client()
@@ -321,11 +325,11 @@ def upload_mp3_to_liara(audio_bytes: bytes, filename: str | None = None) -> str:
 
     Args:
         audio_bytes: Raw MP3 data.
-        filename: Optional object name (e.g. ``custom.mp3``). Stored under ``audio/``.
-            May also be a full ``cases/.../reply.mp3`` key.
+        filename: Optional object name. May be ``audio/...``, ``cases/...``,
+            or dated ``YYYY-MM-DD/{uuid}.mp3``.
 
     Returns:
-        Public key for ``/voice/audio/{key}`` (e.g. ``xxxx.mp3`` or ``cases/.../reply.mp3``).
+        Public key for ``/voice/audio/{key}``.
 
     Raises:
         RuntimeError: If upload fails.
@@ -334,7 +338,9 @@ def upload_mp3_to_liara(audio_bytes: bytes, filename: str | None = None) -> str:
         object_name = f"{_uuid.uuid4().hex}.mp3"
         storage_key = resolve_storage_key(object_name)
         public_key = object_name
-    elif filename.startswith(("audio/", "cases/")):
+    elif filename.startswith(("audio/", "cases/")) or re.match(
+        r"^\d{4}-\d{2}-\d{2}/", filename
+    ):
         storage_key = resolve_storage_key(filename)
         public_key = storage_key
     else:
@@ -346,7 +352,7 @@ def upload_mp3_to_liara(audio_bytes: bytes, filename: str | None = None) -> str:
     return public_key
 
 
-def upload_mp3_with_timeout(audio_bytes: bytes, timeout: float = 45) -> str | None:
+def upload_mp3_with_timeout(audio_bytes: bytes, timeout: float = 90) -> str | None:
     """Upload MP3 with a hard deadline; returns public key or None on failure.
 
     Uses shutdown(wait=False) so a hung S3 call cannot block the worker after
@@ -365,7 +371,7 @@ def upload_mp3_with_timeout(audio_bytes: bytes, timeout: float = 45) -> str | No
 def upload_mp3_to_key_with_timeout(
     audio_bytes: bytes,
     storage_key: str,
-    timeout: float = 45,
+    timeout: float = 90,
 ) -> str | None:
     """Upload MP3 to an explicit storage key with a hard deadline."""
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)

@@ -31,6 +31,10 @@ class ReviewFixTests(unittest.TestCase):
             resolve_storage_key("cases/u1/output/reply.mp3"),
             "cases/u1/output/reply.mp3",
         )
+        self.assertEqual(
+            resolve_storage_key("2026-07-19/u1.mp3"),
+            "2026-07-19/u1.mp3",
+        )
 
 
 if __name__ == "__main__":
