@@ -53,7 +53,11 @@ GET /api/get-msg?uuid=...
 
 ---
 
-## Mode B — Voice → Text (STT)
+## Mode B — Voice → Text (STT only)
+
+HakimAI owns medical reasoning. The voice server **only transcribes** speech to Persian text (no RAG / no LLM on this path).
+
+STT uses Whisper (`WHISPER_MODEL_SIZE`, default `medium`) with a Persian medical + digits prompt and stronger beam search. Prefer clean WAV / 16 kHz mono from the client when possible.
 
 ```bash
 curl -X POST "http://192.168.1.235:8000/api/cases" \
@@ -62,13 +66,13 @@ curl -X POST "http://192.168.1.235:8000/api/cases" \
   -F "file=@question.wav"
 ```
 
-Then:
+Then poll:
 
 ```http
 GET /api/get-msg?uuid=ext-1002
 ```
 
-When `status=ready`, use `text` / `answer` / `transcript`.
+When `status=ready`, use `text` (same as `transcript` / `answer`). Ignore `null` while `queued`/`processing`.
 
 ---
 
@@ -77,3 +81,4 @@ When `status=ready`, use `text` / `answer` / `transcript`.
 1. Voice API base URL + `API_KEY`
 2. S3 endpoint / bucket / keys (for TTS download only)
 3. Poll formula: `{tehran_date}/{uuid}.mp3`
+4. For voice: poll `GET /api/get-msg` until `status=ready`, then read `text`

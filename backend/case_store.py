@@ -15,7 +15,7 @@ Internal metadata (optional, voice-server only)::
     cases/{uuid}/output/text.json   # STT text backup
 
 TTS: HakimAI polls S3 for ``{date}/{uuid}.mp3`` — do not expose bucket/key in API JSON.
-STT: HakimAI reads text via GET /api/get-msg (no MP3 required).
+STT: Whisper transcription only; HakimAI reads ``text`` via GET /api/get-msg (no RAG/LLM, no MP3).
 """
 from __future__ import annotations
 

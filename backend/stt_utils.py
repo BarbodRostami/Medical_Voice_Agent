@@ -2,14 +2,28 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 
+# Bias Whisper toward Persian medical + everyday digits (common in HakimAI tests).
 WHISPER_MEDICAL_PROMPT_FA = (
-    "سوال پزشکی فارسی درباره پارامترهای حیاتی و مراقبت‌های ویژه: "
+    "گفتار فارسی واضح. اعداد: صفر یک دو سه چهار پنج شش هفت هشت نه ده. "
+    "سلام، بیمار، فشار خون، تنفس، نبض، تب. "
+    "سوال پزشکی درباره پارامترهای حیاتی و مراقبت‌های ویژه: "
     "اشباع اکسیژن SpO2، دی‌اکسید کربن ETCO2، فشار خون MAP، PEEP، لاکتات، pH، "
-    "فشار خون، تنفس، کاپنوگرافی."
+    "کاپنوگرافی، ونتیلاتور."
+)
+
+# Conservative fixes for frequent short-utterance Whisper FA mistakes.
+_TRANSCRIPT_PHRASE_FIXES: tuple[tuple[str, str], ...] = (
+    ("ایک دوسر", "یک دو سه"),
+    ("ایک دو سر", "یک دو سه"),
+    ("یک دوسر", "یک دو سه"),
+    ("یک دو سر", "یک دو سه"),
+    ("دوسر", "دو سه"),
+    ("ایک ", "یک "),
 )
 
 _MIME_TO_EXT: dict[str, str] = {
@@ -97,12 +111,37 @@ def _is_garbled_transcription(text: str) -> bool:
     return True
 
 
+def _beam_size() -> int:
+    raw = os.getenv("WHISPER_BEAM_SIZE", "8").strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        return 8
+    return max(1, min(n, 20))
+
+
+def normalize_transcript_fa(text: str) -> str:
+    """Light cleanup + known short-phrase fixes (does not invent medical content)."""
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    if not cleaned:
+        return cleaned
+    for bad, good in _TRANSCRIPT_PHRASE_FIXES:
+        cleaned = cleaned.replace(bad, good)
+    return cleaned.strip(" ،,")
+
+
 def _whisper_transcribe(model, audio_path: str, language: str | None) -> str:
+    beam = _beam_size()
     kwargs: dict = dict(
-        beam_size=5,
+        beam_size=beam,
+        best_of=beam,
+        patience=1.0,
+        temperature=0.0,
         vad_filter=True,
+        vad_parameters={"min_silence_duration_ms": 400},
         condition_on_previous_text=False,
         initial_prompt=WHISPER_MEDICAL_PROMPT_FA,
+        without_timestamps=True,
     )
     if language:
         kwargs["language"] = language
@@ -116,9 +155,20 @@ def transcribe_medical_speech(model, audio_path: str) -> str:
     try:
         text = _whisper_transcribe(model, wav_path, language="fa")
         if _is_garbled_transcription(text):
-            print(f"STT (fa) garbled: {text[:80]!r} — retrying auto-detect")
+            try:
+                print(f"STT (fa) garbled: {text[:80]!r} - retrying auto-detect", flush=True)
+            except UnicodeEncodeError:
+                print("STT (fa) garbled - retrying auto-detect", flush=True)
             text = _whisper_transcribe(model, wav_path, language=None)
-        print(f"STT final: {text[:100]}")
+        text = normalize_transcript_fa(text)
+        try:
+            print(f"STT final: {text[:200]}", flush=True)
+        except UnicodeEncodeError:
+            print(
+                "STT final: "
+                + text[:200].encode("utf-8", errors="backslashreplace").decode("ascii"),
+                flush=True,
+            )
         return text
     finally:
         if cleanup and os.path.exists(wav_path):

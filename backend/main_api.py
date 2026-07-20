@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import threading
 import uuid
 from collections import OrderedDict
@@ -11,6 +12,12 @@ from typing import Literal
 from urllib.parse import urlparse
 
 import tempfile
+
+# Windows consoles (cp1252) crash on Persian/emoji in print — break STT/case workers.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import requests
 import uvicorn
@@ -100,7 +107,46 @@ _cases_lock = threading.Lock()
 # Whisper model — loaded once on first STT request (lazy, ~150MB for "tiny")
 _whisper_model = None
 _whisper_lock = threading.Lock()
-_WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small")  # tiny / small / medium
+# medium is slower on CPU but markedly better for Persian short utterances.
+_WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "medium")  # tiny / small / medium / large-v3
+
+
+def _whisper_load_candidates() -> list[tuple[str, str]]:
+    """Build (device, compute_type) attempts. Explicit env wins; else CUDA then CPU fallback."""
+    device = (os.getenv("WHISPER_DEVICE") or "").strip().lower()
+    compute = (os.getenv("WHISPER_COMPUTE_TYPE") or "").strip().lower()
+
+    if device and compute:
+        # Still append safe fallbacks so a bad pair (e.g. cuda+float16) does not kill the case.
+        extras: list[tuple[str, str]] = []
+        if (device, compute) != ("cpu", "int8"):
+            extras.append(("cpu", "int8"))
+        if device == "cuda" and compute == "float16":
+            extras = [("cuda", "int8"), ("cuda", "float32"), ("cpu", "int8")]
+        return [(device, compute), *[e for e in extras if e != (device, compute)]]
+
+    if device == "cpu":
+        return [(device, compute or "int8")]
+
+    if device == "cuda":
+        comps = [compute] if compute else ["float16", "int8", "float32"]
+        out = [(device, c) for c in comps]
+        out.append(("cpu", "int8"))
+        return out
+
+    # Auto-detect: try CUDA variants, always end with CPU int8.
+    candidates: list[tuple[str, str]] = []
+    try:
+        import ctranslate2
+
+        if ctranslate2.get_cuda_device_count() > 0:
+            candidates.extend(
+                [("cuda", "float16"), ("cuda", "int8"), ("cuda", "float32")]
+            )
+    except Exception:
+        pass
+    candidates.append(("cpu", "int8"))
+    return candidates
 
 
 def _get_whisper() -> "WhisperModel":
@@ -110,9 +156,33 @@ def _get_whisper() -> "WhisperModel":
     with _whisper_lock:
         if _whisper_model is None:
             from faster_whisper import WhisperModel
-            print(f"Loading Whisper model '{_WHISPER_MODEL_SIZE}'...")
-            _whisper_model = WhisperModel(_WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
-            print("Whisper ready.")
+
+            last_error: Exception | None = None
+            for device, compute in _whisper_load_candidates():
+                try:
+                    print(
+                        f"Loading Whisper model '{_WHISPER_MODEL_SIZE}' "
+                        f"(device={device}, compute_type={compute})..."
+                    )
+                    _whisper_model = WhisperModel(
+                        _WHISPER_MODEL_SIZE,
+                        device=device,
+                        compute_type=compute,
+                    )
+                    print(
+                        f"Whisper ready (device={device}, compute_type={compute})."
+                    )
+                    break
+                except Exception as e:
+                    last_error = e
+                    print(
+                        f"Whisper load failed on {device}/{compute}: {e} — trying next..."
+                    )
+            if _whisper_model is None:
+                raise RuntimeError(
+                    f"Could not load Whisper model '{_WHISPER_MODEL_SIZE}'. "
+                    f"Last error: {last_error}"
+                )
     return _whisper_model
 
 
@@ -742,13 +812,27 @@ def _worker_case_text(case_id: str, text: str, base_url: str) -> None:
         _patch_case(case_id, status="failed", message="خطا در پردازش.", error=str(e))
 
 
+def _safe_log(msg: str) -> None:
+    """Print without crashing Windows cp1252 consoles on Persian text."""
+    try:
+        print(msg, flush=True)
+    except UnicodeEncodeError:
+        print(msg.encode("utf-8", errors="backslashreplace").decode("ascii", errors="replace"), flush=True)
+
+
 def _worker_case_audio(case_id: str, audio_path: str, base_url: str) -> None:
-    """Voice/STT case: STT → RAG → text for GET /api/get-msg (no TTS — lighter on server)."""
+    """HakimAI voice case: STT only → text for GET /api/get-msg (no RAG/LLM/TTS).
+
+    HakimAI owns medical reasoning; this server only turns speech into Persian text.
+    """
+    del base_url  # reserved for future audio_url links; unused in STT-only mode
     try:
         _patch_case(case_id, status="processing", message="در حال تبدیل صدا به متن...")
+        _safe_log(f"[case {case_id}] STT started")
         whisper = _get_whisper()
-        persian_query = transcribe_medical_speech(whisper, audio_path)
-        if not persian_query:
+        transcript = transcribe_medical_speech(whisper, audio_path)
+        if not transcript:
+            _safe_log(f"[case {case_id}] FAILED: empty transcription")
             _patch_case(
                 case_id,
                 status="failed",
@@ -757,59 +841,33 @@ def _worker_case_audio(case_id: str, audio_path: str, base_url: str) -> None:
             )
             return
 
-        _patch_case(case_id, message="در حال ترجمه سوال...", transcript=persian_query)
-        query = translate_to_english(persian_query)
-
-        _patch_case(case_id, message="در حال جستجو در پایگاه دانش...")
-        key = _cache_key(query)
-        cached = _get_cache(key)
-        if cached:
-            answer = cached["answer"]
-        else:
-            if db is None or llm is None:
-                raise RuntimeError("System not initialized.")
-            docs = _retrieve(query)
-            context = "\n\n---\n\n".join([doc.page_content for doc in docs])
-            prompt = _build_rag_prompt(query, context)
-            _patch_case(case_id, message="در حال تولید پاسخ با هوش مصنوعی...")
-            raw = llm.invoke(prompt)
-            answer = _clean_llm_output(raw, query)
-            _set_cache(key, answer, len(docs))
-            _save_to_django(query, answer)
-
-        if not answer or len(answer.strip()) < 5:
-            _patch_case(
-                case_id,
-                status="failed",
-                message="پاسخی تولید نشد.",
-                transcript=persian_query,
-                error="LLM returned empty or too-short answer",
-            )
-            return
-
-        # HakimAI wants text via get-msg — translate to Persian for display.
-        _patch_case(case_id, message="در حال آماده‌سازی متن فارسی...")
-        persian_answer = translate_to_persian(answer)
-        if not persian_answer or len(persian_answer.strip()) < 3:
-            persian_answer = answer
-
         try:
-            save_output_text(case_id, transcript=persian_query, answer=persian_answer)
+            save_output_text(case_id, transcript=transcript, answer=transcript)
         except Exception as e:
-            print(f"Warning: could not store case output text: {e}")
+            _safe_log(f"[case {case_id}] Warning: could not store output text: {e}")
 
         _patch_case(
             case_id,
             status="ready",
             message="تکمیل شد — متن آماده است (GET /api/get-msg).",
-            transcript=persian_query,
-            answer=persian_answer,
-            text=persian_answer,
+            transcript=transcript,
+            answer=transcript,
+            text=transcript,
             audio_url=None,
             error=None,
         )
+        # Log the exact payload HakimAI should read.
+        payload = {
+            "uuid": case_id,
+            "status": "ready",
+            "mode": "audio",
+            "text": transcript,
+            "transcript": transcript,
+            "answer": transcript,
+        }
+        _safe_log(f"[case {case_id}] READY for get-msg: {json.dumps(payload, ensure_ascii=False)}")
     except Exception as e:
-        print(f"[case {case_id}] FAILED: {e}")
+        _safe_log(f"[case {case_id}] FAILED: {e}")
         _patch_case(case_id, status="failed", message="خطا در پردازش.", error=str(e))
     finally:
         try:
@@ -851,8 +909,7 @@ def _enqueue_case_audio(
     content_type: str | None,
     base_url: str,
 ) -> dict:
-    if db is None or llm is None:
-        raise HTTPException(status_code=500, detail="System not initialized.")
+    # Collaborator audio path is STT-only — does not need Chroma / Ollama.
     if not raw:
         raise HTTPException(status_code=400, detail="Empty audio upload.")
     suffix = detect_audio_extension(raw, filename, content_type)
@@ -868,8 +925,8 @@ def _enqueue_case_audio(
         "status": "queued",
         "mode": "audio",
         "message": (
-            "فایل صوتی دریافت شد — متن را با GET /api/get-msg?uuid=... بگیرید "
-            "(فیلد text / answer / transcript)."
+            "فایل صوتی دریافت شد — پس از ready متن همان ویس در "
+            "GET /api/get-msg?uuid=... (فیلد text / transcript / answer)."
         ),
     }
 
@@ -1028,8 +1085,9 @@ async def create_case(req: Request):
     - **TTS (text):** JSON ``{\"uuid\",\"text\"}`` → we upload MP3 to
       ``{YYYY-MM-DD}/{uuid}.mp3`` (Tehran date). HakimAI polls that key on S3.
       API responses do not expose s3_bucket / s3_key.
-    - **STT (audio):** multipart ``uuid`` + ``file`` → STT+RAG text;
-      HakimAI reads ``text`` via ``GET /api/get-msg?uuid=``.
+    - **STT (audio):** multipart ``uuid`` + ``file`` → Whisper STT only;
+      HakimAI reads ``text`` (same as transcript) via ``GET /api/get-msg?uuid=``.
+      No RAG/LLM on this path — HakimAI owns medical reasoning.
     """
     content_type = (req.headers.get("content-type") or "").lower()
     base_url = _public_base_url(req)

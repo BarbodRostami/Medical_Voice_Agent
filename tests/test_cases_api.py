@@ -1,9 +1,10 @@
 """Unit tests for collaborator cases helpers (no RAG / model load)."""
 from __future__ import annotations
 
-import re
+import tempfile
 import unittest
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from backend.case_store import new_meta, output_audio_key, tehran_date_str, validate_case_id
 from backend.medical_voice_utils import build_audio_proxy_url, resolve_storage_key
@@ -55,6 +56,46 @@ class CaseStoreTests(unittest.TestCase):
             url,
             "http://192.168.1.235:8000/voice/audio/2026-07-19/case-1.mp3",
         )
+
+
+class SttOnlyCaseWorkerTests(unittest.TestCase):
+    """Collaborator audio path must return transcript as text without calling LLM."""
+
+    def test_worker_sets_ready_with_transcript_as_text(self) -> None:
+        import backend.main_api as api
+
+        case_id = "stt-only-unit-1"
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp.write(b"RIFF....WAVEfmt ")
+            path = tmp.name
+
+        patches: dict[str, dict] = {
+            case_id: new_meta(case_id, mode="audio"),
+        }
+
+        def fake_patch(cid: str, **kwargs: object) -> None:
+            patches[cid].update(kwargs)
+
+        with (
+            patch.object(api, "_patch_case", side_effect=fake_patch),
+            patch.object(api, "_get_whisper", return_value=MagicMock()),
+            patch.object(
+                api,
+                "transcribe_medical_speech",
+                return_value="سلام یک دو سه",
+            ),
+            patch.object(api, "save_output_text"),
+            patch.object(api, "_safe_log"),
+        ):
+            api._worker_case_audio(case_id, path, "http://127.0.0.1:8000")
+
+        meta = patches[case_id]
+        self.assertEqual(meta["status"], "ready")
+        self.assertEqual(meta["text"], "سلام یک دو سه")
+        self.assertEqual(meta["transcript"], "سلام یک دو سه")
+        self.assertEqual(meta["answer"], "سلام یک دو سه")
+        self.assertIsNone(meta.get("error"))
+        self.assertFalse(Path(path).exists())
 
 
 if __name__ == "__main__":

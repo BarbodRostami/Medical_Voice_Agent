@@ -138,7 +138,7 @@ def translate_to_english(text: str) -> str:
         result = GoogleTranslator(source="auto", target="en").translate(text)
         return result if result else text
     except Exception as e:
-        print(f"Translation (→en) error: {e}")
+        print(f"Translation (to en) error: {e}")
         return text
 
 
