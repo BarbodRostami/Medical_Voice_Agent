@@ -1,9 +1,10 @@
 #!/bin/bash
 # Run on company server after .env is in place.
-# Usage: bash scripts/server_setup.sh
+# Usage: bash scripts/server_setup.sh [/path/to/Medical_Voice_Agent]
 set -euo pipefail
 
 PROJECT_DIR="${1:-$HOME/Medical_Voice_Agent}"
+BRANCH="${DEPLOY_BRANCH:-feature/external-cases-api}"
 cd "$PROJECT_DIR"
 
 echo "=== Checking .env (Parmin) ==="
@@ -18,16 +19,37 @@ if ! grep -q "^PUBLIC_API_URL=" .env 2>/dev/null; then
   echo "PUBLIC_API_URL=http://192.168.1.15:8000" >> .env
   echo "Added PUBLIC_API_URL to .env"
 fi
-# Reject obvious wrong credentials (GitHub token prefix)
+# Company VM must advertise its own LAN IP (not a laptop IP).
+if grep -qE '^PUBLIC_API_URL=http://192\.168\.1\.235' .env 2>/dev/null; then
+  sed -i.bak 's|^PUBLIC_API_URL=.*|PUBLIC_API_URL=http://192.168.1.15:8000|' .env
+  echo "Corrected PUBLIC_API_URL to http://192.168.1.15:8000"
+fi
+# Whisper defaults safe for CPU VMs (avoid CUDA float16 crashes)
+grep -q '^WHISPER_MODEL_SIZE=' .env 2>/dev/null || echo 'WHISPER_MODEL_SIZE=medium' >> .env
+grep -q '^WHISPER_DEVICE=' .env 2>/dev/null || echo 'WHISPER_DEVICE=cpu' >> .env
+grep -q '^WHISPER_COMPUTE_TYPE=' .env 2>/dev/null || echo 'WHISPER_COMPUTE_TYPE=int8' >> .env
 if grep -q "LIARA_ACCESS_KEY=ghp_" .env 2>/dev/null; then
   echo "ERROR: LIARA_ACCESS_KEY looks like a GitHub token — use Parmin Cloud keys"
   exit 1
 fi
 
-echo "=== Git pull ==="
-git fetch origin
-git checkout feature/async-stt-jobs 2>/dev/null || true
-git pull origin feature/async-stt-jobs 2>/dev/null || git pull origin HEAD
+echo "=== Git pull ($BRANCH) ==="
+# Ensure company remote (behinmed) exists — laptop pushes feature branches there.
+if ! git remote get-url company >/dev/null 2>&1; then
+  git remote add company https://github.com/behinmed/medical-voice-agent.git || true
+fi
+if git remote get-url company >/dev/null 2>&1; then
+  REMOTE=company
+elif git remote get-url origin >/dev/null 2>&1; then
+  REMOTE=origin
+else
+  echo "ERROR: no git remote configured"
+  exit 1
+fi
+echo "Using remote: $REMOTE"
+git fetch "$REMOTE"
+git checkout "$BRANCH" || git checkout -b "$BRANCH" "$REMOTE/$BRANCH"
+git pull --ff-only "$REMOTE" "$BRANCH" || git reset --hard "$REMOTE/$BRANCH"
 
 echo "=== Ollama host (Linux server) ==="
 if grep -q 'OLLAMA_HOST=http://host.docker.internal:11434' docker-compose.yml 2>/dev/null; then
@@ -36,15 +58,20 @@ if grep -q 'OLLAMA_HOST=http://host.docker.internal:11434' docker-compose.yml 2>
 fi
 
 echo "=== Docker rebuild backend ==="
-sudo docker compose up -d --build backend
+if command -v docker-compose >/dev/null 2>&1; then
+  COMPOSE="sudo docker-compose"
+else
+  COMPOSE="sudo docker compose"
+fi
+$COMPOSE up -d --build backend
 
 echo "=== Health check ==="
-sleep 8
-curl -sf http://localhost:8000/ | head -c 200
+sleep 12
+curl -sf http://localhost:8000/ | head -c 300
 echo ""
 
 echo "=== S3 upload smoke test ==="
-sudo docker compose exec -T backend python - <<'PY'
+$COMPOSE exec -T backend python - <<'PY'
 import os, boto3
 from botocore.config import Config as C
 from dotenv import load_dotenv
@@ -64,4 +91,5 @@ print("S3 upload OK:", key)
 PY
 
 echo "=== Done ==="
-echo "Test: curl -X POST http://$(hostname -I | awk '{print $1}'):8000/jobs/voice-report ..."
+echo "API: http://192.168.1.15:8000/"
+echo "Docs: http://192.168.1.15:8000/docs"
