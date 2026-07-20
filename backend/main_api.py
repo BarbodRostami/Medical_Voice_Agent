@@ -23,8 +23,8 @@ from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from pydantic import BaseModel, Field
 
-from api_auth import configured_api_key, enforce_api_key
-from case_store import (
+from backend.api_auth import configured_api_key, enforce_api_key
+from backend.case_store import (
     load_meta,
     new_meta,
     output_audio_key,
@@ -34,8 +34,8 @@ from case_store import (
     save_output_text,
     validate_case_id,
 )
-from llm_output import clean_llm_output
-from medical_voice_utils import (
+from backend.llm_output import clean_llm_output
+from backend.medical_voice_utils import (
     build_audio_proxy_url,
     download_mp3_from_storage,
     english_to_persian_voice,
@@ -46,7 +46,7 @@ from medical_voice_utils import (
     upload_mp3_to_liara,
     upload_mp3_with_timeout,
 )
-from stt_utils import detect_audio_extension, transcribe_medical_speech
+from backend.stt_utils import detect_audio_extension, transcribe_medical_speech
 
 app = FastAPI(title="Medical RAG API")
 app.middleware("http")(enforce_api_key)

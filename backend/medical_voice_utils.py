@@ -1,6 +1,6 @@
 """
 Shared voice/TTS utilities for Medical RAG project.
-Used by both main_api.py (FastAPI backend) and app_ui.py (Streamlit UI).
+Used by both backend.main_api (FastAPI) and backend.app_ui (Streamlit UI).
 """
 from __future__ import annotations
 

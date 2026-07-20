@@ -1,12 +1,14 @@
 venv/
 venv311/
 __pycache__/
-*.mp3
-*.wav
+*.pyc
 .git/
 *.zip
-*.pyc
+archive/
+*.sqlite3
 db.sqlite3
+db/
 *.mp3
 *.wav
 # *.onnx
+.env

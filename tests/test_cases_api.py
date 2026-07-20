@@ -5,8 +5,8 @@ import re
 import unittest
 from unittest.mock import patch
 
-from case_store import new_meta, output_audio_key, tehran_date_str, validate_case_id
-from medical_voice_utils import build_audio_proxy_url, resolve_storage_key
+from backend.case_store import new_meta, output_audio_key, tehran_date_str, validate_case_id
+from backend.medical_voice_utils import build_audio_proxy_url, resolve_storage_key
 
 
 class CaseStoreTests(unittest.TestCase):
@@ -31,7 +31,7 @@ class CaseStoreTests(unittest.TestCase):
         self.assertRegex(tehran_date_str(), r"^\d{4}-\d{2}-\d{2}$")
 
     def test_new_meta_has_dated_output_key_no_public_s3_fields(self) -> None:
-        with patch("case_store.tehran_date_str", return_value="2026-07-19"):
+        with patch("backend.case_store.tehran_date_str", return_value="2026-07-19"):
             meta = new_meta("case-1", mode="text")
         self.assertEqual(meta["status"], "queued")
         self.assertEqual(meta["output_key"], "2026-07-19/case-1.mp3")

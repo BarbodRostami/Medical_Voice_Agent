@@ -24,7 +24,7 @@ from datetime import datetime
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from medical_voice_utils import (
+from backend.medical_voice_utils import (
     get_json_from_storage,
     put_json_to_storage,
     put_storage_object,

@@ -5,9 +5,9 @@ __pycache__/
 venv/
 .venv/
 env/
-venv311/ 
+venv311/
 db/
-Critical_Care_Notes.pdf
+
 # Databases
 *.sqlite3
 db.sqlite3
@@ -16,9 +16,12 @@ db.sqlite3
 *.onnx
 *.json
 !postman/*.json
+!assets/models/*.onnx.json
 *.mp3
 *.wav
 *.zip
+archive/
+assets/data/*.pdf
 
 # OS files
 .DS_Store

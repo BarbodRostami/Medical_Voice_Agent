@@ -3,8 +3,8 @@ from pathlib import Path
 
 import requests
 import streamlit as st
-from api_auth import request_headers
-from medical_voice_utils import (
+from backend.api_auth import request_headers
+from backend.medical_voice_utils import (
     clean_persian_for_tts,
     tts_to_mp3,
     translate_to_persian,

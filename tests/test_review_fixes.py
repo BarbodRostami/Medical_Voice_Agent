@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import unittest
 
-from llm_output import clean_llm_output
-from medical_voice_utils import build_audio_proxy_url, resolve_storage_key
+from backend.llm_output import clean_llm_output
+from backend.medical_voice_utils import build_audio_proxy_url, resolve_storage_key
 
 
 class ReviewFixTests(unittest.TestCase):
