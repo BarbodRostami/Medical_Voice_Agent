@@ -1,6 +1,6 @@
 import requests
 
-from api_auth import request_headers
+from backend.api_auth import request_headers
 
 r = requests.get("http://localhost:8000/jobs", headers=request_headers(), timeout=5)
 d = r.json()

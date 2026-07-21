@@ -41,11 +41,19 @@ PUBLIC_API_URL=http://192.168.1.15:8000
 
 ## ۳. اجرای پروژه
 
+### با Docker
 ```bash
 docker compose up -d
 ```
 
-> اولین بار حدود **10-20 دقیقه** طول میکشه:
+### لوکال (برای دیدن لاگ در ترمینال)
+از ریشهٔ پروژه:
+```powershell
+cd d:\Python_envs\rag_project
+.\venv\Scripts\python.exe -m uvicorn backend.main_api:app --host 0.0.0.0 --port 8000 --log-level info
+```
+
+> اولین بار با Docker حدود **10-20 دقیقه** طول میکشه:
 > - image‌های Docker دانلود میشن
 > - مدل `biomistral` (~4 GB) از Ollama دانلود میشه
 
@@ -80,6 +88,11 @@ docker compose logs -f backend
 ## ۷. API برای همکار فرانت‌اند
 
 مستندات تعاملی: **http://SERVER_IP:8000/docs**
+
+قرارداد سرور خارجی / HakimAI: فایل **[COLLABORATOR_API.md](COLLABORATOR_API.md)**  
+
+- **TTS:** `POST /api/ask` → HakimAI فایل MP3 را مستقیم از S3 پول می‌کند (`s3_key`)  
+- **STT:** `POST /api/cases` + فایل → متن با `GET /api/get-msg?uuid=`
 
 ### جریان async (پیشنهادی)
 

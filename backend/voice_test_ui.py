@@ -1,8 +1,8 @@
 """
 Local voice test UI — record Persian speech, get RAG answer, play MP3.
 
-Run (backend must be on :8000):
-    streamlit run voice_test_ui.py
+Run (backend must be on :8000), from project root:
+    streamlit run backend/voice_test_ui.py
 """
 from __future__ import annotations
 
@@ -14,9 +14,9 @@ from pathlib import Path
 import requests
 import streamlit as st
 
-from api_auth import request_headers
-from medical_voice_utils import persian_to_voice
-from stt_utils import detect_audio_extension
+from backend.api_auth import request_headers
+from backend.medical_voice_utils import persian_to_voice
+from backend.stt_utils import detect_audio_extension
 
 API_BASE = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
 POLL_SEC = 3
@@ -87,7 +87,7 @@ st.caption(f"Backend: `{API_BASE}`")
 
 with st.sidebar:
     st.markdown("### راه‌اندازی")
-    st.code("python main_api.py", language="bash")
+    st.code("uvicorn backend.main_api:app --host 0.0.0.0 --port 8000", language="bash")
     st.code("streamlit run voice_test_ui.py", language="bash")
     if st.button("بررسی اتصال"):
         try:

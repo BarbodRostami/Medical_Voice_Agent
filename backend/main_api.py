@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import threading
 import uuid
 from collections import OrderedDict
@@ -11,6 +12,12 @@ from typing import Literal
 from urllib.parse import urlparse
 
 import tempfile
+
+# Windows consoles (cp1252) crash on Persian/emoji in print — break STT/case workers.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import requests
 import uvicorn
@@ -21,29 +28,40 @@ from langchain_community.llms import Ollama as OllamaLLM
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from api_auth import configured_api_key, enforce_api_key
-from llm_output import clean_llm_output
-from medical_voice_utils import (
+from backend.api_auth import configured_api_key, enforce_api_key
+from backend.case_store import (
+    load_meta,
+    new_meta,
+    output_audio_key,
+    save_input_audio,
+    save_input_text,
+    save_meta,
+    save_output_text,
+    validate_case_id,
+)
+from backend.llm_output import clean_llm_output
+from backend.medical_voice_utils import (
     build_audio_proxy_url,
     download_mp3_from_storage,
     english_to_persian_voice,
     persian_to_voice,
     translate_to_english,
     translate_to_persian,
+    upload_mp3_to_key_with_timeout,
     upload_mp3_to_liara,
     upload_mp3_with_timeout,
 )
-from stt_utils import detect_audio_extension, transcribe_medical_speech
+from backend.stt_utils import detect_audio_extension, transcribe_medical_speech
 
 app = FastAPI(title="Medical RAG API")
 app.middleware("http")(enforce_api_key)
 
-PERSIST_DIRECTORY = "db"
+PERSIST_DIRECTORY = "db"  
 # Must match the model used in ingestion.py (MedCPT — a medical-domain encoder)
 EMBEDDING_MODEL = "ncbi/MedCPT-Article-Encoder"
-LLM_MODEL = "biomistral:latest"
+LLM_MODEL = "biomistral:latest" 
 RETRIEVE_K = 5       # final number of chunks returned
 FETCH_K = 20         # candidates for MMR to diversify from
 
@@ -82,10 +100,53 @@ JobStatus = Literal["queued", "processing", "done", "failed"]
 _jobs: dict[str, dict] = {}
 _job_executor = ThreadPoolExecutor(max_workers=5)
 
+# Collaborator cases keyed by external uuid (also persisted as cases/{uuid}/meta.json).
+_cases: dict[str, dict] = {}
+_cases_lock = threading.Lock()
+
 # Whisper model — loaded once on first STT request (lazy, ~150MB for "tiny")
 _whisper_model = None
 _whisper_lock = threading.Lock()
-_WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small")  # tiny / small / medium
+# medium is slower on CPU but markedly better for Persian short utterances.
+_WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "medium")  # tiny / small / medium / large-v3
+
+
+def _whisper_load_candidates() -> list[tuple[str, str]]:
+    """Build (device, compute_type) attempts. Explicit env wins; else CUDA then CPU fallback."""
+    device = (os.getenv("WHISPER_DEVICE") or "").strip().lower()
+    compute = (os.getenv("WHISPER_COMPUTE_TYPE") or "").strip().lower()
+
+    if device and compute:
+        # Still append safe fallbacks so a bad pair (e.g. cuda+float16) does not kill the case.
+        extras: list[tuple[str, str]] = []
+        if (device, compute) != ("cpu", "int8"):
+            extras.append(("cpu", "int8"))
+        if device == "cuda" and compute == "float16":
+            extras = [("cuda", "int8"), ("cuda", "float32"), ("cpu", "int8")]
+        return [(device, compute), *[e for e in extras if e != (device, compute)]]
+
+    if device == "cpu":
+        return [(device, compute or "int8")]
+
+    if device == "cuda":
+        comps = [compute] if compute else ["float16", "int8", "float32"]
+        out = [(device, c) for c in comps]
+        out.append(("cpu", "int8"))
+        return out
+
+    # Auto-detect: try CUDA variants, always end with CPU int8.
+    candidates: list[tuple[str, str]] = []
+    try:
+        import ctranslate2
+
+        if ctranslate2.get_cuda_device_count() > 0:
+            candidates.extend(
+                [("cuda", "float16"), ("cuda", "int8"), ("cuda", "float32")]
+            )
+    except Exception:
+        pass
+    candidates.append(("cpu", "int8"))
+    return candidates
 
 
 def _get_whisper() -> "WhisperModel":
@@ -95,9 +156,33 @@ def _get_whisper() -> "WhisperModel":
     with _whisper_lock:
         if _whisper_model is None:
             from faster_whisper import WhisperModel
-            print(f"Loading Whisper model '{_WHISPER_MODEL_SIZE}'...")
-            _whisper_model = WhisperModel(_WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
-            print("Whisper ready.")
+
+            last_error: Exception | None = None
+            for device, compute in _whisper_load_candidates():
+                try:
+                    print(
+                        f"Loading Whisper model '{_WHISPER_MODEL_SIZE}' "
+                        f"(device={device}, compute_type={compute})..."
+                    )
+                    _whisper_model = WhisperModel(
+                        _WHISPER_MODEL_SIZE,
+                        device=device,
+                        compute_type=compute,
+                    )
+                    print(
+                        f"Whisper ready (device={device}, compute_type={compute})."
+                    )
+                    break
+                except Exception as e:
+                    last_error = e
+                    print(
+                        f"Whisper load failed on {device}/{compute}: {e} — trying next..."
+                    )
+            if _whisper_model is None:
+                raise RuntimeError(
+                    f"Could not load Whisper model '{_WHISPER_MODEL_SIZE}'. "
+                    f"Last error: {last_error}"
+                )
     return _whisper_model
 
 
@@ -118,6 +203,55 @@ def _update_job(job_id: str, **kwargs) -> None:
         _jobs[job_id].update(kwargs)
 
 
+def _set_case(meta: dict) -> None:
+    with _cases_lock:
+        _cases[meta["uuid"]] = meta
+    # Persist meta in background so enqueue / status updates stay fast.
+    _job_executor.submit(_persist_case_meta_safe, dict(meta))
+
+
+def _persist_case_meta_safe(meta: dict) -> None:
+    try:
+        save_meta(meta)
+    except Exception as e:
+        print(f"Warning: could not persist case meta to S3: {e}")
+
+
+def _patch_case(case_id: str, **kwargs) -> None:
+    with _cases_lock:
+        current = dict(_cases.get(case_id) or {})
+        if not current:
+            return
+        current.update(kwargs)
+        _cases[case_id] = current
+        snapshot = dict(current)
+    _job_executor.submit(_persist_case_meta_safe, snapshot)
+
+
+def _get_case(case_id: str) -> dict | None:
+    with _cases_lock:
+        cached = _cases.get(case_id)
+        if cached is not None:
+            return dict(cached)
+    try:
+        meta = load_meta(case_id)
+    except Exception as e:
+        print(f"Warning: could not load case meta from S3: {e}")
+        return None
+    if meta is None:
+        return None
+    with _cases_lock:
+        _cases[case_id] = meta
+    return dict(meta)
+
+
+class CaseTextRequest(BaseModel):
+    """JSON body for text-only collaborator cases (aliases: /api/cases, /api/ask)."""
+
+    uuid: str = Field(..., description="External server case id")
+    text: str = Field(..., min_length=1, description="Persian (or TTS-ready) text")
+
+
 db = None
 llm = None
 bm25_retriever = None
@@ -130,12 +264,12 @@ print("Loading Vector Database and Models...")
 try:
     # Use MedCPT — a medical-domain encoder that matches how the DB was indexed
     embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
-
+    
     if not os.path.exists(PERSIST_DIRECTORY):
         print(f"Warning: Folder '{PERSIST_DIRECTORY}' not found!")
 
     db = Chroma(persist_directory=PERSIST_DIRECTORY, embedding_function=embeddings)
-
+    
     # ── Build Hybrid Retriever ──────────────────────────────────────────────
     # 1. Load all documents from ChromaDB for BM25 keyword index
     raw = db._collection.get(include=["documents", "metadatas"])
@@ -315,7 +449,7 @@ async def chat_stream(request: QuestionRequest):
     if db is None or llm is None or bm25_retriever is None:
         raise HTTPException(status_code=500, detail="System not initialized.")
 
-    query = request.query
+        query = request.query
     key = _cache_key(query)
     cached = _get_cache(key)
 
@@ -646,6 +780,182 @@ def _worker_voice(job_id: str, full_text: str, base_url: str) -> None:
         _update_job(job_id, status="failed", message="خطا در پردازش.", error=str(e))
 
 
+def _worker_case_text(case_id: str, text: str, base_url: str) -> None:
+    """Text/TTS case: MP3 → S3 as ``{YYYY-MM-DD}/{uuid}.mp3`` for HakimAI poll."""
+    try:
+        _patch_case(case_id, status="processing", message="در حال تبدیل متن به صدا...")
+        audio_bytes = persian_to_voice(text)
+        with _cases_lock:
+            day = (_cases.get(case_id) or {}).get("day")
+        out_key = output_audio_key(case_id, day)
+        _patch_case(
+            case_id,
+            message="در حال آپلود فایل صوتی روی S3...",
+            output_key=out_key,
+        )
+        print(f"[case {case_id}] uploading MP3 -> {out_key} ({len(audio_bytes)} bytes)")
+        file_key = upload_mp3_to_key_with_timeout(audio_bytes, out_key, timeout=90)
+        if not file_key:
+            raise RuntimeError(f"S3 upload failed or timed out for key={out_key}")
+        print(f"[case {case_id}] S3 upload OK: {file_key}")
+        audio_url = build_audio_proxy_url(base_url, file_key)
+        _patch_case(
+            case_id,
+            status="ready",
+            message="تکمیل شد — فایل روی S3 آماده است.",
+            audio_url=audio_url,
+            output_key=file_key,
+            error=None,
+        )
+    except Exception as e:
+        print(f"[case {case_id}] FAILED: {e}")
+        _patch_case(case_id, status="failed", message="خطا در پردازش.", error=str(e))
+
+
+def _safe_log(msg: str) -> None:
+    """Print without crashing Windows cp1252 consoles on Persian text."""
+    try:
+        print(msg, flush=True)
+    except UnicodeEncodeError:
+        print(msg.encode("utf-8", errors="backslashreplace").decode("ascii", errors="replace"), flush=True)
+
+
+def _worker_case_audio(case_id: str, audio_path: str, base_url: str) -> None:
+    """HakimAI voice case: STT only → text for GET /api/get-msg (no RAG/LLM/TTS).
+
+    HakimAI owns medical reasoning; this server only turns speech into Persian text.
+    """
+    del base_url  # reserved for future audio_url links; unused in STT-only mode
+    try:
+        _patch_case(case_id, status="processing", message="در حال تبدیل صدا به متن...")
+        _safe_log(f"[case {case_id}] STT started")
+        whisper = _get_whisper()
+        transcript = transcribe_medical_speech(whisper, audio_path)
+        if not transcript:
+            _safe_log(f"[case {case_id}] FAILED: empty transcription")
+            _patch_case(
+                case_id,
+                status="failed",
+                message="صدایی شناسایی نشد.",
+                error="Empty transcription",
+            )
+            return
+
+        try:
+            save_output_text(case_id, transcript=transcript, answer=transcript)
+        except Exception as e:
+            _safe_log(f"[case {case_id}] Warning: could not store output text: {e}")
+
+        _patch_case(
+            case_id,
+            status="ready",
+            message="تکمیل شد — متن آماده است (GET /api/get-msg).",
+            transcript=transcript,
+            answer=transcript,
+            text=transcript,
+            audio_url=None,
+            error=None,
+        )
+        # Log the exact payload HakimAI should read.
+        payload = {
+            "uuid": case_id,
+            "status": "ready",
+            "mode": "audio",
+            "text": transcript,
+            "transcript": transcript,
+            "answer": transcript,
+        }
+        _safe_log(f"[case {case_id}] READY for get-msg: {json.dumps(payload, ensure_ascii=False)}")
+    except Exception as e:
+        _safe_log(f"[case {case_id}] FAILED: {e}")
+        _patch_case(case_id, status="failed", message="خطا در پردازش.", error=str(e))
+    finally:
+        try:
+            os.remove(audio_path)
+        except Exception:
+            pass
+
+
+def _enqueue_case_text(case_id: str, text: str, base_url: str) -> dict:
+    cleaned = text.strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="text must not be empty.")
+    _job_executor.submit(_save_input_text_safe, case_id, cleaned)
+    meta = new_meta(case_id, mode="text")
+    _set_case(meta)
+    _job_executor.submit(_worker_case_text, case_id, cleaned, base_url)
+    return {
+        "uuid": case_id,
+        "status": "queued",
+        "mode": "text",
+        "message": (
+            "پذیرفته شد — بعد از ready فایل را از S3 با کلید "
+            f"{{YYYY-MM-DD}}/{case_id}.mp3 بگیرید (تاریخ تهران)."
+        ),
+    }
+
+
+def _save_input_text_safe(case_id: str, text: str) -> None:
+    try:
+        save_input_text(case_id, text)
+    except Exception as e:
+        print(f"Warning: could not store case input text: {e}")
+
+
+def _enqueue_case_audio(
+    case_id: str,
+    raw: bytes,
+    filename: str | None,
+    content_type: str | None,
+    base_url: str,
+) -> dict:
+    # Collaborator audio path is STT-only — does not need Chroma / Ollama.
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty audio upload.")
+    suffix = detect_audio_extension(raw, filename, content_type)
+    _job_executor.submit(_save_input_audio_safe, case_id, raw, suffix)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(raw)
+        tmp_path = tmp.name
+    meta = new_meta(case_id, mode="audio")
+    _set_case(meta)
+    _job_executor.submit(_worker_case_audio, case_id, tmp_path, base_url)
+    return {
+        "uuid": case_id,
+        "status": "queued",
+        "mode": "audio",
+        "message": (
+            "فایل صوتی دریافت شد — پس از ready متن همان ویس در "
+            "GET /api/get-msg?uuid=... (فیلد text / transcript / answer)."
+        ),
+    }
+
+
+def _save_input_audio_safe(case_id: str, raw: bytes, suffix: str) -> None:
+    try:
+        save_input_audio(case_id, raw, suffix)
+    except Exception as e:
+        print(f"Warning: could not store case input audio: {e}")
+
+
+def _case_public_view(meta: dict) -> dict:
+    """Public JSON for HakimAI — no s3_bucket / s3_key fields."""
+    text = meta.get("text") or meta.get("answer") or meta.get("transcript")
+    return {
+        "uuid": meta.get("uuid"),
+        "status": meta.get("status"),
+        "mode": meta.get("mode"),
+        "message": meta.get("message"),
+        "text": text,
+        "transcript": meta.get("transcript"),
+        "answer": meta.get("answer"),
+        "audio_url": meta.get("audio_url"),
+        "error": meta.get("error"),
+        "created_at": meta.get("created_at"),
+        "updated_at": meta.get("updated_at"),
+    }
+
+
 # ─── Job Endpoints ────────────────────────────────────────────────────────────
 
 @app.post(
@@ -759,6 +1069,138 @@ async def get_job_status(job_id: str):
 @app.get("/jobs", summary="List all jobs (debug)")
 async def list_jobs():
     return {"total": len(_jobs), "jobs": _jobs}
+
+
+# ─── Collaborator Cases (external server ↔ voice server via S3) ───────────────
+
+@app.post(
+    "/api/cases",
+    summary="Create case (text XOR audio) keyed by external uuid",
+    response_description="Accepted immediately; poll GET /api/cases/{uuid}",
+)
+async def create_case(req: Request):
+    """
+    External-server / HakimAI contract (exactly one input mode — not both):
+
+    - **TTS (text):** JSON ``{\"uuid\",\"text\"}`` → we upload MP3 to
+      ``{YYYY-MM-DD}/{uuid}.mp3`` (Tehran date). HakimAI polls that key on S3.
+      API responses do not expose s3_bucket / s3_key.
+    - **STT (audio):** multipart ``uuid`` + ``file`` → Whisper STT only;
+      HakimAI reads ``text`` (same as transcript) via ``GET /api/get-msg?uuid=``.
+      No RAG/LLM on this path — HakimAI owns medical reasoning.
+    """
+    content_type = (req.headers.get("content-type") or "").lower()
+    base_url = _public_base_url(req)
+
+    if "application/json" in content_type:
+        try:
+            body = await req.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body.")
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="JSON body must be an object.")
+        try:
+            case_id = validate_case_id(str(body.get("uuid", "")))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        text = str(body.get("text") or "").strip()
+        if not text:
+            raise HTTPException(
+                status_code=400,
+                detail="JSON mode requires non-empty text. For audio use multipart.",
+            )
+        if body.get("audio") not in (None, "", False):
+            raise HTTPException(
+                status_code=400,
+                detail="Send text OR audio — not both. Use multipart for audio-only.",
+            )
+        return _enqueue_case_text(case_id, text, base_url)
+
+    try:
+        form = await req.form()
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Expected application/json or multipart/form-data.",
+        ) from None
+
+    try:
+        case_id = validate_case_id(str(form.get("uuid") or ""))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    text = str(form.get("text") or "").strip()
+    upload = form.get("file")
+    raw = b""
+    filename: str | None = None
+    file_content_type: str | None = None
+    if upload is not None and hasattr(upload, "read"):
+        raw = await upload.read()
+        filename = getattr(upload, "filename", None)
+        file_content_type = getattr(upload, "content_type", None)
+    has_file = bool(raw)
+
+    if text and has_file:
+        raise HTTPException(
+            status_code=400,
+            detail="Send text OR audio file — not both (server capacity).",
+        )
+    if text:
+        return _enqueue_case_text(case_id, text, base_url)
+    if has_file:
+        return _enqueue_case_audio(
+            case_id,
+            raw,
+            filename,
+            file_content_type,
+            base_url,
+        )
+    raise HTTPException(
+        status_code=400,
+        detail="Provide non-empty text, or an audio file (not both, not neither).",
+    )
+
+
+@app.post(
+    "/api/ask",
+    summary="Alias of POST /api/cases for text JSON {uuid, text}",
+)
+async def api_ask(body: CaseTextRequest, req: Request):
+    try:
+        case_id = validate_case_id(body.uuid)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return _enqueue_case_text(case_id, body.text, _public_base_url(req))
+
+
+@app.get(
+    "/api/cases/{case_id}",
+    summary="Get case status / audio_url by external uuid",
+)
+async def get_case(case_id: str):
+    try:
+        case_id = validate_case_id(case_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    meta = _get_case(case_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Case not found.")
+    return _case_public_view(meta)
+
+
+@app.get(
+    "/api/get-msg",
+    summary="Alias of GET /api/cases/{uuid} (?uuid=)",
+)
+async def get_msg(uuid: str):
+    try:
+        case_id = validate_case_id(uuid)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    meta = _get_case(case_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Case not found.")
+    return _case_public_view(meta)
 
 
 @app.get(

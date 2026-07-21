@@ -5,7 +5,7 @@ import os
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
-from api_auth import api_keys_match, configured_api_key, enforce_api_key, is_public_path
+from backend.api_auth import api_keys_match, configured_api_key, enforce_api_key, is_public_path
 
 
 class ApiAuthTests(unittest.TestCase):
@@ -38,7 +38,7 @@ class ApiAuthTests(unittest.TestCase):
                 os.environ["API_KEY"] = old
 
     def test_request_headers_includes_key_when_set(self) -> None:
-        from api_auth import request_headers
+        from backend.api_auth import request_headers
 
         old = os.environ.get("API_KEY")
         try:

@@ -11,10 +11,12 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main_api.py api_auth.py llm_output.py medical_voice_utils.py stt_utils.py ingestion.py ./
+COPY backend/ ./backend/
 # ChromaDB persisted volume mounted at runtime (see docker-compose.yml)
 VOLUME ["/app/db"]
 
+ENV PYTHONPATH=/app
+
 EXPOSE 8000
 
-CMD ["python", "main_api.py"]
+CMD ["uvicorn", "backend.main_api:app", "--host", "0.0.0.0", "--port", "8000"]

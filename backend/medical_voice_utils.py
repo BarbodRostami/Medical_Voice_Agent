@@ -1,6 +1,6 @@
 """
 Shared voice/TTS utilities for Medical RAG project.
-Used by both main_api.py (FastAPI backend) and app_ui.py (Streamlit UI).
+Used by both backend.main_api (FastAPI) and backend.app_ui (Streamlit UI).
 """
 from __future__ import annotations
 
@@ -138,7 +138,7 @@ def translate_to_english(text: str) -> str:
         result = GoogleTranslator(source="auto", target="en").translate(text)
         return result if result else text
     except Exception as e:
-        print(f"Translation (→en) error: {e}")
+        print(f"Translation (to en) error: {e}")
         return text
 
 
@@ -214,35 +214,136 @@ def persian_to_voice(persian_text: str, timeout: int = 60) -> bytes:
 # ─── Object Storage (S3-compatible) ──────────────────────────────────────────
 
 def _get_s3_client() -> _S3Client:
-    """Return a cached S3 client (lazy singleton)."""
+    """Return a cached S3 client (lazy singleton).
+
+    Parmin must be reached **directly from this machine** — never via HTTP(S) proxy
+    (proxy causes SSL/read timeouts to ``sas.amin.parminstorage.ir``).
+    """
     global _s3_client
     if _s3_client is None:
+        # Ensure env proxy vars cannot redirect Parmin traffic for this process.
+        endpoint = (os.getenv("LIARA_ENDPOINT") or "").strip()
+        host = ""
+        if endpoint:
+            from urllib.parse import urlparse
+
+            host = urlparse(endpoint).hostname or ""
+        existing = os.getenv("NO_PROXY") or os.getenv("no_proxy") or ""
+        bypass = {
+            "localhost",
+            "127.0.0.1",
+            "sas.amin.parminstorage.ir",
+            "parminstorage.ir",
+        }
+        if host:
+            bypass.add(host)
+        merged = ",".join(sorted({*existing.split(","), *bypass} - {""}))
+        os.environ["NO_PROXY"] = merged
+        os.environ["no_proxy"] = merged
+
         _s3_client = boto3.client(
             "s3",
-            endpoint_url=os.getenv("LIARA_ENDPOINT"),
+            endpoint_url=endpoint or None,
             aws_access_key_id=os.getenv("LIARA_ACCESS_KEY"),
             aws_secret_access_key=os.getenv("LIARA_SECRET_KEY"),
             region_name="us-east-1",
             config=_BotocoreConfig(
                 signature_version="s3v4",
-                connect_timeout=10,
-                read_timeout=30,
-                retries={"max_attempts": 2},
+                connect_timeout=20,
+                read_timeout=90,
+                retries={"max_attempts": 4, "mode": "standard"},
+                # Explicit empty dict = do not use system/env HTTP(S)_PROXY.
+                proxies={},
             ),
         )
     return _s3_client
 
 
 def resolve_storage_key(public_key: str) -> str:
-    """Map proxy URL segment to full S3 object key (audio/xxx.mp3)."""
+    """Map proxy URL segment to full S3 object key.
+
+    - ``audio/...`` legacy clips
+    - ``cases/...`` internal case metadata
+    - ``YYYY-MM-DD/{uuid}.mp3`` HakimAI TTS poll keys
+    """
     key = public_key.lstrip("/")
-    return key if key.startswith("audio/") else f"audio/{key}"
+    if key.startswith(("audio/", "cases/")):
+        return key
+    if re.match(r"^\d{4}-\d{2}-\d{2}/", key):
+        return key
+    return f"audio/{key}"
 
 
 def build_audio_proxy_url(base_url: str, public_key: str) -> str:
-    """Build client-facing URL: .../voice/audio/{uuid}.mp3 (no duplicate audio/ prefix)."""
+    """Build client-facing URL: .../voice/audio/{key} (supports dated keys)."""
     base = base_url.rstrip("/") + "/"
     return f"{base}voice/audio/{public_key.lstrip('/')}"
+
+
+def _bucket_name() -> str:
+    return os.getenv("LIARA_BUCKET", "voiceai")
+
+
+def put_storage_object(key: str, body: bytes, content_type: str) -> str:
+    """Upload bytes to a full storage key."""
+    storage_key = resolve_storage_key(key)
+    try:
+        s3 = _get_s3_client()
+        s3.put_object(
+            Bucket=_bucket_name(),
+            Key=storage_key,
+            Body=body,
+            ContentType=content_type,
+        )
+        return storage_key
+    except (BotoCoreError, ClientError) as e:
+        raise RuntimeError(f"Upload failed: {e}") from e
+
+
+def get_storage_object(key: str) -> bytes:
+    """Download an object by public or full storage key."""
+    storage_key = resolve_storage_key(key)
+    try:
+        s3 = _get_s3_client()
+        resp = s3.get_object(Bucket=_bucket_name(), Key=storage_key)
+        return resp["Body"].read()
+    except (BotoCoreError, ClientError) as e:
+        raise RuntimeError(f"Download failed: {e}") from e
+
+
+def storage_object_exists(key: str) -> bool:
+    """Return True if the object exists in the configured bucket."""
+    storage_key = resolve_storage_key(key)
+    try:
+        s3 = _get_s3_client()
+        s3.head_object(Bucket=_bucket_name(), Key=storage_key)
+        return True
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in {"404", "NoSuchKey", "NotFound"}:
+            return False
+        raise RuntimeError(f"Head object failed: {e}") from e
+    except BotoCoreError as e:
+        raise RuntimeError(f"Head object failed: {e}") from e
+
+
+def put_json_to_storage(key: str, payload: dict) -> str:
+    """Serialize ``payload`` as UTF-8 JSON and upload it."""
+    import json
+
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    return put_storage_object(key, body, "application/json")
+
+
+def get_json_from_storage(key: str) -> dict:
+    """Download a JSON object and parse it."""
+    import json
+
+    raw = get_storage_object(key)
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, dict):
+        raise RuntimeError("Stored JSON is not an object.")
+    return data
 
 
 def upload_mp3_to_liara(audio_bytes: bytes, filename: str | None = None) -> str:
@@ -250,36 +351,34 @@ def upload_mp3_to_liara(audio_bytes: bytes, filename: str | None = None) -> str:
 
     Args:
         audio_bytes: Raw MP3 data.
-        filename: Optional object name (e.g. ``custom.mp3``). Stored under ``audio/``.
+        filename: Optional object name. May be ``audio/...``, ``cases/...``,
+            or dated ``YYYY-MM-DD/{uuid}.mp3``.
 
     Returns:
-        Public key for ``/voice/audio/{key}`` (e.g. ``xxxx.mp3``).
+        Public key for ``/voice/audio/{key}``.
 
     Raises:
         RuntimeError: If upload fails.
     """
     if filename is None:
         object_name = f"{_uuid.uuid4().hex}.mp3"
+        storage_key = resolve_storage_key(object_name)
+        public_key = object_name
+    elif filename.startswith(("audio/", "cases/")) or re.match(
+        r"^\d{4}-\d{2}-\d{2}/", filename
+    ):
+        storage_key = resolve_storage_key(filename)
+        public_key = storage_key
     else:
         object_name = filename.rsplit("/", 1)[-1]
-    storage_key = resolve_storage_key(object_name)
+        storage_key = resolve_storage_key(object_name)
+        public_key = object_name
 
-    bucket = os.getenv("LIARA_BUCKET", "voiceai")
-
-    try:
-        s3 = _get_s3_client()
-        s3.put_object(
-            Bucket=bucket,
-            Key=storage_key,
-            Body=audio_bytes,
-            ContentType="audio/mpeg",
-        )
-        return object_name
-    except (BotoCoreError, ClientError) as e:
-        raise RuntimeError(f"Upload failed: {e}") from e
+    put_storage_object(storage_key, audio_bytes, "audio/mpeg")
+    return public_key
 
 
-def upload_mp3_with_timeout(audio_bytes: bytes, timeout: float = 45) -> str | None:
+def upload_mp3_with_timeout(audio_bytes: bytes, timeout: float = 90) -> str | None:
     """Upload MP3 with a hard deadline; returns public key or None on failure.
 
     Uses shutdown(wait=False) so a hung S3 call cannot block the worker after
@@ -295,15 +394,25 @@ def upload_mp3_with_timeout(audio_bytes: bytes, timeout: float = 45) -> str | No
         pool.shutdown(wait=False)
 
 
+def upload_mp3_to_key_with_timeout(
+    audio_bytes: bytes,
+    storage_key: str,
+    timeout: float = 90,
+) -> str | None:
+    """Upload MP3 to an explicit storage key with a hard deadline."""
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        return pool.submit(upload_mp3_to_liara, audio_bytes, storage_key).result(
+            timeout=timeout
+        )
+    except Exception:
+        return None
+    finally:
+        pool.shutdown(wait=False)
+
+
 def download_mp3_from_storage(key: str) -> bytes:
     """Download an MP3 object from private storage by public or full key."""
-    bucket = os.getenv("LIARA_BUCKET", "voiceai")
-    storage_key = resolve_storage_key(key)
-    try:
-        s3 = _get_s3_client()
-        resp = s3.get_object(Bucket=bucket, Key=storage_key)
-        return resp["Body"].read()
-    except (BotoCoreError, ClientError) as e:
-        raise RuntimeError(f"Download failed: {e}") from e
+    return get_storage_object(key)
 
 

@@ -9,7 +9,7 @@ import time
 
 import requests
 
-from api_auth import request_headers
+from backend.api_auth import request_headers
 
 BASE = "http://localhost:8000"
 
