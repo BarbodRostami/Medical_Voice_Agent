@@ -21,8 +21,10 @@ db.sqlite3
 *.wav
 *.zip
 archive/
+
+# Generated / scratch audio (keep folder via .gitkeep)
 assets/data/*.pdf
 
-# OS files
+# OS / secrets
 .DS_Store
 .env

@@ -1,4 +1,9 @@
-"""Speech-to-text helpers: audio normalization (ffmpeg) + Whisper medical transcription."""
+"""Speech-to-text helpers: audio normalization (ffmpeg) + Whisper medical transcription.
+
+Default STT is local faster-whisper. Optional ``STT_PROVIDER=openai`` uses an
+OpenAI-compatible ``/audio/transcriptions`` API (GapGPT / OpenAI) and falls
+back to local Whisper on any failure.
+"""
 from __future__ import annotations
 
 import os
@@ -6,7 +11,16 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Callable
+from typing import Any
 
+import requests
+
+from backend.provider_config import (
+    openai_compatible_config,
+    openai_stt_model,
+    stt_provider,
+)
 # Bias Whisper toward Persian medical + everyday digits (common in HakimAI tests).
 WHISPER_MEDICAL_PROMPT_FA = (
     "گفتار فارسی واضح. اعداد: صفر یک دو سه چهار پنج شش هفت هشت نه ده. "
@@ -149,8 +163,8 @@ def _whisper_transcribe(model, audio_path: str, language: str | None) -> str:
     return " ".join(seg.text for seg in segments).strip()
 
 
-def transcribe_medical_speech(model, audio_path: str) -> str:
-    """Normalize audio, transcribe in Persian, retry with auto-detect if garbled."""
+def transcribe_medical_speech(model: Any, audio_path: str) -> str:
+    """Normalize audio, transcribe in Persian with local Whisper, retry if garbled."""
     wav_path, cleanup = normalize_audio_for_stt(audio_path)
     try:
         text = _whisper_transcribe(model, wav_path, language="fa")
@@ -176,3 +190,83 @@ def transcribe_medical_speech(model, audio_path: str) -> str:
                 os.remove(wav_path)
             except OSError:
                 pass
+
+
+def _openai_transcribe_file(audio_path: str, timeout: int = 120) -> str:
+    """OpenAI-compatible ``/audio/transcriptions`` → Persian text."""
+    cfg = openai_compatible_config()
+    if not cfg.configured:
+        raise RuntimeError("OPENAI_API_KEY (or GAPGPT_API_KEY) is not set")
+
+    model = openai_stt_model()
+    with open(audio_path, "rb") as fh:
+        response = requests.post(
+            f"{cfg.base_url}/audio/transcriptions",
+            headers={"Authorization": f"Bearer {cfg.api_key}"},
+            files={"file": (os.path.basename(audio_path), fh)},
+            data={
+                "model": model,
+                "language": "fa",
+                "prompt": WHISPER_MEDICAL_PROMPT_FA[:800],
+            },
+            timeout=timeout,
+        )
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"OpenAI STT HTTP {response.status_code}: {response.text[:300]}"
+        )
+    # JSON ``{text: ...}`` or plain text depending on provider
+    ctype = (response.headers.get("content-type") or "").lower()
+    if "application/json" in ctype:
+        data = response.json()
+        text = (data.get("text") or "").strip()
+    else:
+        text = response.text.strip()
+    if not text:
+        raise RuntimeError("OpenAI STT returned empty transcript")
+    return normalize_transcript_fa(text)
+
+
+def transcribe_medical_audio(
+    audio_path: str,
+    local_model_getter: Callable[[], Any],
+) -> str:
+    """STT entrypoint with provider switch + local fallback.
+
+    ``STT_PROVIDER``:
+      - ``local`` (default): faster-whisper via ``local_model_getter``
+      - ``openai``: cloud transcriptions; on missing key / error → local
+    """
+    provider = stt_provider()
+    if provider == "openai":
+        cfg = openai_compatible_config()
+        if not cfg.configured:
+            print("STT_PROVIDER=openai but no API key; using local Whisper")
+        else:
+            try:
+                # Prefer normalized WAV when possible for more stable upstream decode
+                wav_path, cleanup = normalize_audio_for_stt(audio_path)
+                try:
+                    print(
+                        f"STT provider=openai base={cfg.base_url} "
+                        f"model={openai_stt_model()}"
+                    )
+                    text = _openai_transcribe_file(wav_path)
+                    try:
+                        print(f"STT cloud final: {text[:200]}", flush=True)
+                    except UnicodeEncodeError:
+                        print("STT cloud final: <persian>", flush=True)
+                    return text
+                finally:
+                    if cleanup and os.path.exists(wav_path):
+                        try:
+                            os.remove(wav_path)
+                        except OSError:
+                            pass
+            except Exception as e:
+                print(f"OpenAI-compatible STT failed ({e}); falling back to local Whisper")
+    elif provider not in ("", "local"):
+        print(f"Unknown STT_PROVIDER={provider!r}; using local Whisper")
+
+    model = local_model_getter()
+    return transcribe_medical_speech(model, audio_path)

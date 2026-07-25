@@ -51,6 +51,8 @@ GET /api/get-msg?uuid=...
 
 `status`: `queued` | `processing` | `ready` | `failed`
 
+TTS engine is internal to the voice server. Default is local `edge-tts`. Optional cloud TTS via `TTS_PROVIDER=openai` + API key (`OPENAI_API_KEY` / `GAPGPT_API_KEY`, optional `OPENAI_BASE_URL` for GapGPT); on missing key or any API error the server falls back to edge. STT defaults to local Whisper (`STT_PROVIDER=local`); optional `STT_PROVIDER=openai` uses cloud transcriptions with the same key/base and falls back to local Whisper. Speech-prep (abbreviations + `TTS_DIGIT_MODE`, optional `SPEECH_NORMALIZE_LLM`) runs before every TTS provider. HakimAI contract (JSON + S3 key) does not change.
+
 ---
 
 ## Mode B — Voice → Text (STT only)

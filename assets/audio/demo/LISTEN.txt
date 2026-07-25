@@ -1,0 +1,11 @@
+Voice A/B demo pack
+===================
+01_dict_edge     = local edge-tts + dictionary/phrasing prep
+02_dict_openai   = GapGPT/OpenAI TTS + dictionary/phrasing prep
+03_llm_openai    = GapGPT/OpenAI TTS + dictionary + LLM speech polish
+
+Play on Windows:
+  Invoke-Item "D:\Python_envs\rag_project\assets\audio\demo\*.mp3"
+Or open folder and compare 01 → 02 → 03 for the same case label.
+
+See docs/VOICE_DEMO_CHECKLIST.md for presentation checklist.
