@@ -53,8 +53,9 @@ jobs:
 
             echo "==> Pulling latest main branch..."
             git fetch https://$GH_PAT@github.com/behinmed/medical-voice-agent.git main
+            git stash || true
             git checkout main
-            git pull https://$GH_PAT@github.com/behinmed/medical-voice-agent.git main
+            git reset --hard FETCH_HEAD
 
             echo "==> Rebuilding and restarting backend container..."
             docker compose up -d --build backend
