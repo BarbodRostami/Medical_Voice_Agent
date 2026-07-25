@@ -25,19 +25,32 @@ Streamlit UI  ──▶  FastAPI Backend (RAG)  ──▶  Django Admin (chat hi
 | Embeddings | `ncbi/MedCPT-Query/Article-Encoder`, `all-mpnet-base-v2` |
 | LLM | BioMistral via Ollama |
 | Frontend | Streamlit |
-| TTS / Translation | Piper TTS (Farsi), deep-translator |
+| TTS / Translation | edge-tts (default) / OpenAI-compatible (GapGPT), deep-translator |
 | Admin Panel | Django + DRF |
 | Infra | Docker Compose |
 
 ## Project Structure
 
 ```
-main_api.py         # FastAPI RAG endpoint
-app_ui.py            # Streamlit chat UI
-ingestion.py          # Builds Chroma vector DB from PDF
-chat.py / voice_chat.py  # CLI clients (text / voice)
-docker-compose.yml      # backend, frontend, django-admin services
-config/, api/            # Django project + chat-history app
+backend/                 # FastAPI + Streamlit + voice utils
+  main_api.py            # RAG / TTS / STT / collaborator cases API
+  app_ui.py              # Streamlit chat UI
+  medical_voice_utils.py # speech-prep + edge/OpenAI TTS + S3
+  provider_config.py     # GapGPT/OpenAI provider knobs + fallbacks
+  stt_utils.py           # Whisper (+ optional cloud STT)
+  case_store.py          # S3 case keys ({date}/{uuid}.mp3)
+tests/                   # Unit / integration tests
+scripts/                 # ingestion, smoke/demo TTS, deploy helpers
+docs/                    # SETUP, COLLABORATOR_API, VOICE_DEMO_CHECKLIST
+assets/
+  audio/demo/            # presentation A/B pack
+  audio/scratch/         # one-off smoke tests (gitignored mp3)
+  models/                # optional legacy Piper ONNX
+  data/                  # source PDFs
+postman/                 # Postman collection + environment
+admin_panel/, api/, config/   # Django admin (chat history)
+legacy/                  # deprecated helpers (e.g. old Piper path)
+archive/                 # large zip backups (gitignored)
 ```
 
 ## Prerequisites
@@ -47,21 +60,24 @@ config/, api/            # Django project + chat-history app
   ```bash
   ollama pull biomistral
   ```
-- A source PDF (e.g. `Critical_Care_Notes.pdf`) in the project root
-- *(Optional)* Piper Farsi voice model files (`fa_IR-amir-medium.onnx*`)
+- A source PDF under `assets/data/` (e.g. `Critical_Care_Notes.pdf`)
+- *(Optional)* OpenAI-compatible key for GapGPT TTS (`TTS_PROVIDER=openai`)
 
 ## Setup
 
 ```bash
-# 1. Build the vector database
+# 1. Build the vector database (from project root)
 pip install -r requirements.txt
-python ingestion.py
+python scripts/ingestion.py
 
 # 2. Start Ollama
 ollama serve
 
 # 3. Launch all services
 docker-compose up --build
+
+# Local backend (without Docker):
+uvicorn backend.main_api:app --host 0.0.0.0 --port 8000
 
 # 4. Run Django migrations (first time only)
 docker-compose exec django-admin python manage.py migrate
@@ -90,7 +106,7 @@ docker-compose exec django-admin python manage.py createsuperuser
 
 ## Known Issues / Notes
 
-- **Embedding mismatch**: `ingestion.py`, `chat.py`, and `main_api.py` use different embedding models (`MedCPT-Article-Encoder`, `MedCPT-Query-Encoder`, `all-mpnet-base-v2`). The ingestion and query-time embedding model **must match** for retrieval to work correctly.
+- **Embedding mismatch**: ingestion / chat / `backend.main_api` historically used different embedding models. The ingestion and query-time embedding model **must match** for retrieval to work correctly.
 - **Secrets**: keep API keys (e.g. `OPENROUTER_API_KEY`) in `.env`, never commit them.
 - **Ollama host access**: backend uses `host.docker.internal` to reach Ollama on the host; works out of the box on Docker Desktop, requires `extra_hosts` on Linux (already configured in `docker-compose.yml`).
 - **Django settings**: `DEBUG=True` and `ALLOWED_HOSTS=['*']` are dev-only — harden before any production deployment.

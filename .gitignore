@@ -5,9 +5,9 @@ __pycache__/
 venv/
 .venv/
 env/
-venv311/ 
+venv311/
 db/
-Critical_Care_Notes.pdf
+
 # Databases
 *.sqlite3
 db.sqlite3
@@ -15,10 +15,16 @@ db.sqlite3
 # Models & Large Files
 *.onnx
 *.json
+!postman/*.json
+!assets/models/*.onnx.json
 *.mp3
 *.wav
 *.zip
+archive/
 
-# OS files
+# Generated / scratch audio (keep folder via .gitkeep)
+assets/data/*.pdf
+
+# OS / secrets
 .DS_Store
 .env

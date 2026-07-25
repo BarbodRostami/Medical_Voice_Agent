@@ -1,4 +1,8 @@
 streamlit
 requests
-deep-translator
-piper-tts
+python-dotenv
+deep-translator==1.11.4
+edge-tts==7.2.8
+
+# Required by medical_voice_utils (S3 upload) imported from app_ui.py
+boto3==1.43.40
