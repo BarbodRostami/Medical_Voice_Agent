@@ -58,7 +58,8 @@ jobs:
             git reset --hard FETCH_HEAD
 
             echo "==> Rebuilding and restarting backend container..."
-            docker compose up -d --build backend
+            docker compose build --network host backend
+            docker compose up -d backend
 
             echo "==> Deploy complete!"
             docker compose ps
