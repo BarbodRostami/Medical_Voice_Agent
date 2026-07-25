@@ -58,9 +58,9 @@ jobs:
             git reset --hard FETCH_HEAD
 
             echo "==> Rebuilding and restarting backend container..."
-            docker-compose up -d --build backend
+            docker compose up -d --build backend
 
             echo "==> Deploy complete!"
-            docker-compose ps
+            docker compose ps
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
