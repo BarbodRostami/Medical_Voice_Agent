@@ -58,8 +58,8 @@ jobs:
             git reset --hard FETCH_HEAD
 
             echo "==> Rebuilding and restarting backend container..."
-            docker compose build --network host backend
-            docker compose up -d backend
+            docker build --network host -t medical_voice_agent_backend:latest .
+            docker compose up -d --no-build backend
 
             echo "==> Deploy complete!"
             docker compose ps
