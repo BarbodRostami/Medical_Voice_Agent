@@ -46,17 +46,20 @@ jobs:
           port: ${{ secrets.SERVER_PORT }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: GH_PAT
           script: |
             set -e
             cd ${{ secrets.SERVER_PATH }}
 
             echo "==> Pulling latest main branch..."
-            git fetch company
+            git fetch https://$GH_PAT@github.com/behinmed/medical-voice-agent.git main
             git checkout main
-            git pull company main
+            git pull https://$GH_PAT@github.com/behinmed/medical-voice-agent.git main
 
             echo "==> Rebuilding and restarting backend container..."
             docker compose up -d --build backend
 
             echo "==> Deploy complete!"
             docker compose ps
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
