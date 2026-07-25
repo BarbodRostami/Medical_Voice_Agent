@@ -25,28 +25,31 @@ Streamlit UI  ──▶  FastAPI Backend (RAG)  ──▶  Django Admin (chat hi
 | Embeddings | `ncbi/MedCPT-Query/Article-Encoder`, `all-mpnet-base-v2` |
 | LLM | BioMistral via Ollama |
 | Frontend | Streamlit |
-| TTS / Translation | Piper TTS (Farsi), deep-translator |
+| TTS / Translation | edge-tts (default) / OpenAI-compatible (GapGPT), deep-translator |
 | Admin Panel | Django + DRF |
 | Infra | Docker Compose |
 
 ## Project Structure
 
 ```
-backend/                 # FastAPI + Streamlit + shared voice utils
+backend/                 # FastAPI + Streamlit + voice utils
   main_api.py            # RAG / TTS / STT / collaborator cases API
   app_ui.py              # Streamlit chat UI
-  medical_voice_utils.py # TTS + Parmin S3 helpers
+  medical_voice_utils.py # speech-prep + edge/OpenAI TTS + S3
+  provider_config.py     # GapGPT/OpenAI provider knobs + fallbacks
+  stt_utils.py           # Whisper (+ optional cloud STT)
   case_store.py          # S3 case keys ({date}/{uuid}.mp3)
-  ...
 tests/                   # Unit / integration tests
-scripts/                 # ingestion, deploy, list_bucket, check_jobs
-docs/                    # SETUP.md, COLLABORATOR_API.md
+scripts/                 # ingestion, smoke/demo TTS, deploy helpers
+docs/                    # SETUP, COLLABORATOR_API, VOICE_DEMO_CHECKLIST
 assets/
-  audio/                 # sample mp3/wav (gitignored)
-  models/                # Piper ONNX voices (gitignored)
+  audio/demo/            # presentation A/B pack
+  audio/scratch/         # one-off smoke tests (gitignored mp3)
+  models/                # optional legacy Piper ONNX
   data/                  # source PDFs
 postman/                 # Postman collection + environment
 admin_panel/, api/, config/   # Django admin (chat history)
+legacy/                  # deprecated helpers (e.g. old Piper path)
 archive/                 # large zip backups (gitignored)
 ```
 
@@ -58,7 +61,7 @@ archive/                 # large zip backups (gitignored)
   ollama pull biomistral
   ```
 - A source PDF under `assets/data/` (e.g. `Critical_Care_Notes.pdf`)
-- *(Optional)* Piper Farsi voice model files under `assets/models/`
+- *(Optional)* OpenAI-compatible key for GapGPT TTS (`TTS_PROVIDER=openai`)
 
 ## Setup
 
