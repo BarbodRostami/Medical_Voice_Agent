@@ -1,10 +1,12 @@
 """Unit tests for PR review fixes — no RAG / model load at import time."""
 from __future__ import annotations
 
+import os
 import unittest
+from unittest.mock import patch
 
 from backend.llm_output import clean_llm_output
-from backend.medical_voice_utils import build_audio_proxy_url, resolve_storage_key
+from backend.storage_keys import build_audio_proxy_url, resolve_storage_key
 
 
 class ReviewFixTests(unittest.TestCase):
@@ -20,9 +22,18 @@ class ReviewFixTests(unittest.TestCase):
         self.assertIn("95-100", cleaned)
 
     def test_audio_proxy_url_single_audio_segment(self) -> None:
-        url = build_audio_proxy_url("http://192.168.1.15:8000", "abc123.mp3")
-        self.assertEqual(url, "http://192.168.1.15:8000/voice/audio/abc123.mp3")
-        self.assertNotIn("/audio/audio/", url)
+        with patch.dict(
+            os.environ,
+            {
+                "API_KEY": "",
+                "AUDIO_SIGNING_SECRET": "",
+                "AUDIO_PROXY_REQUIRE_SIGNATURE": "0",
+            },
+            clear=False,
+        ):
+            url = build_audio_proxy_url("http://192.168.1.15:8000", "abc123.mp3")
+            self.assertEqual(url, "http://192.168.1.15:8000/voice/audio/abc123.mp3")
+            self.assertNotIn("/audio/audio/", url)
 
     def test_resolve_storage_key_from_public_name(self) -> None:
         self.assertEqual(resolve_storage_key("abc.mp3"), "audio/abc.mp3")

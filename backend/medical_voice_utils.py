@@ -664,24 +664,17 @@ def _get_s3_client() -> boto3.client:
 
 
 def resolve_storage_key(public_key: str) -> str:
-    """Map proxy URL segment to full S3 object key.
+    """Map proxy URL segment to full S3 object key. See ``storage_keys``."""
+    from backend.storage_keys import resolve_storage_key as _resolve
 
-    - ``audio/...`` legacy clips
-    - ``cases/...`` internal case metadata
-    - ``YYYY-MM-DD/{uuid}.mp3`` HakimAI TTS poll keys
-    """
-    key = public_key.lstrip("/")
-    if key.startswith(("audio/", "cases/")):
-        return key
-    if re.match(r"^\d{4}-\d{2}-\d{2}/", key):
-        return key
-    return f"audio/{key}"
+    return _resolve(public_key)
 
 
 def build_audio_proxy_url(base_url: str, public_key: str) -> str:
-    """Build client-facing URL: .../voice/audio/{key} (supports dated keys)."""
-    base = base_url.rstrip("/") + "/"
-    return f"{base}voice/audio/{public_key.lstrip('/')}"
+    """Build client-facing URL: .../voice/audio/{key}. See ``storage_keys``."""
+    from backend.storage_keys import build_audio_proxy_url as _build
+
+    return _build(base_url, public_key)
 
 
 def _bucket_name() -> str:

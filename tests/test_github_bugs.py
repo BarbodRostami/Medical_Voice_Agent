@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import ast
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from backend.llm_output import clean_llm_output
-from backend.medical_voice_utils import build_audio_proxy_url
+from backend.storage_keys import build_audio_proxy_url
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN_API = ROOT / "backend" / "main_api.py"
@@ -22,9 +23,18 @@ class AlreadyFixedBugsTests(unittest.TestCase):
         self.assertIn("systemic", clean_llm_output(raw, "BP").lower())
 
     def test_issue10_no_double_audio_path(self) -> None:
-        url = build_audio_proxy_url("http://192.168.1.15:8000", "x.mp3")
-        self.assertEqual(url, "http://192.168.1.15:8000/voice/audio/x.mp3")
-        self.assertNotIn("/audio/audio/", url)
+        with patch.dict(
+            os.environ,
+            {
+                "API_KEY": "",
+                "AUDIO_SIGNING_SECRET": "",
+                "AUDIO_PROXY_REQUIRE_SIGNATURE": "0",
+            },
+            clear=False,
+        ):
+            url = build_audio_proxy_url("http://192.168.1.15:8000", "x.mp3")
+            self.assertEqual(url, "http://192.168.1.15:8000/voice/audio/x.mp3")
+            self.assertNotIn("/audio/audio/", url)
 
     def test_issue4_boto3_in_requirements_ui(self) -> None:
         text = (ROOT / "requirements-ui.txt").read_text(encoding="utf-8")

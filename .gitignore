@@ -35,3 +35,6 @@ assets/data/*.pdf
 # OS files
 # OS / secrets
 .DS_Store
+
+# Local Piper / ONNX models (optional, large)
+assets/models/

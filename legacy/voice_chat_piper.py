@@ -1,3 +1,9 @@
+"""
+LEGACY / DEPRECATED — do not run in production.
+
+Old offline Piper TTS demo. Kept only for reference. The live stack uses
+``backend/medical_voice_utils.py`` (edge-tts / optional cloud TTS).
+"""
 import os
 import re
 import subprocess
@@ -35,21 +41,40 @@ def speak_farsi_offline(text):
         with open(temp_txt, "w", encoding="utf-8") as f:
             f.write(clean_text)
         
-        # ۳. اجرای Piper با خواندن از فایل به جای echo
-        # دستور: piper --model fa_IR-amir-medium.onnx --input_file input_text.txt --output_file response.wav
-        command = f'piper --model {PIPER_MODEL} --input_file {temp_txt} --output_file {output_wav} --length_scale 1.1'
-        
+        # ۳. اجرای Piper بدون shell (avoid injection / shell=True)
         print(f"DEBUG: Running Piper...") # برای اطمینان از اجرا
-        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+        result = subprocess.run(
+            [
+                "piper",
+                "--model",
+                PIPER_MODEL,
+                "--input_file",
+                temp_txt,
+                "--output_file",
+                output_wav,
+                "--length_scale",
+                "1.1",
+            ],
+            capture_output=True,
+            text=True,
+            shell=False,
+        )
         
         if result.returncode != 0:
             print(f"❌ Piper Error: {result.stderr}")
             return
 
-        # ۴. پخش فایل صوتی
+        # ۴. پخش فایل صوتی (Windows only; legacy path)
         if os.path.exists(output_wav):
-            # استفاده از روش مستقیم‌تر برای پخش
-            os.system(f"start /min powershell -c (New-Object Media.SoundPlayer '{output_wav}').PlaySync()")
+            subprocess.run(
+                [
+                    "powershell",
+                    "-c",
+                    f"(New-Object Media.SoundPlayer '{output_wav}').PlaySync()",
+                ],
+                shell=False,
+                check=False,
+            )
             
     except Exception as e:
         print(f"\n❌ خطا در فرآیند پخش صدا: {e}")
