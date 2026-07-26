@@ -12,10 +12,21 @@ import uuid as _uuid
 
 import boto3
 import edge_tts
+import requests
 from botocore.config import Config as _BotocoreConfig
 from botocore.exceptions import BotoCoreError, ClientError
 from deep_translator import GoogleTranslator
 from dotenv import load_dotenv
+
+from backend.provider_config import (
+    openai_compatible_config,
+    openai_speech_llm_model,
+    openai_tts_model,
+    openai_tts_voice,
+    speech_normalize_llm_enabled,
+    tts_digit_mode,
+    tts_provider,
+)
 
 load_dotenv()
 
@@ -23,10 +34,64 @@ load_dotenv()
 
 TTS_VOICE = "fa-IR-DilaraNeural"
 _PERSIAN_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+# Eastern + Arabic-Indic digits → ASCII (OpenAI-compatible TTS often skips Persian digits)
+_TO_ASCII_DIGITS = str.maketrans(
+    "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩",
+    "01234567890123456789",
+)
 _s3_client: boto3.client | None = None
 
-# Medical abbreviations → Persian equivalents
-# Sorted by length (longest first) at replacement time to avoid partial matches
+# Small integers → spoken Persian (optional TTS_DIGIT_MODE=words)
+_ONES_FA = (
+    "صفر",
+    "یک",
+    "دو",
+    "سه",
+    "چهار",
+    "پنج",
+    "شش",
+    "هفت",
+    "هشت",
+    "نه",
+)
+_TEENS_FA = (
+    "ده",
+    "یازده",
+    "دوازده",
+    "سیزده",
+    "چهارده",
+    "پانزده",
+    "شانزده",
+    "هفده",
+    "هجده",
+    "نوزده",
+)
+_TENS_FA = (
+    "",
+    "",
+    "بیست",
+    "سی",
+    "چهل",
+    "پنجاه",
+    "شصت",
+    "هفتاد",
+    "هشتاد",
+    "نود",
+)
+_HUNDREDS_FA = (
+    "",
+    "صد",
+    "دویست",
+    "سیصد",
+    "چهارصد",
+    "پانصد",
+    "ششصد",
+    "هفتصد",
+    "هشتصد",
+    "نهصد",
+)
+
+# Medical abbreviations → speakable Persian (longest match first at runtime)
 MEDICAL_ABBREVIATIONS: dict[str, str] = {
     "ETCO2": "دی‌اکسید کربن بازدمی",
     "EtCO2": "دی‌اکسید کربن بازدمی",
@@ -36,22 +101,32 @@ MEDICAL_ABBREVIATIONS: dict[str, str] = {
     "SaO2": "اشباع اکسیژن شریانی",
     "FiO2": "کسر اکسیژن دمی",
     "HCO3": "بیکربنات",
-    "PEEP": "فشار انتهای بازدمی مثبت",
+    "PEEP": "فشار مثبت انتهای بازدمی",
+    "BiPAP": "بای‌پپ",
+    "CPAP": "سی‌پپ",
+    "NIV": "تهویه غیرتهاجمی",
     "ARDS": "سندرم دیسترس تنفسی حاد",
     "COPD": "بیماری انسدادی مزمن ریه",
+    "COVID": "کووید",
+    "COVID-19": "کووید نوزده",
+    "SOFA": "نمره سوفا",
+    "APACHE": "آپاچی",
     "MAP": "فشار خون متوسط شریانی",
     "CVP": "فشار ورید مرکزی",
     "GCS": "مقیاس کمای گلاسکو",
-    "ICU": "بخش مراقبت‌های ویژه",
+    "ICU": "آی‌سی‌یو",
+    "CCU": "سی‌سی‌یو",
+    "OR": "اتاق عمل",
+    "ER": "اورژانس",
     "CPR": "احیای قلبی ریوی",
     "AED": "دفیبریلاتور خودکار خارجی",
-    "ECG": "الکتروکاردیوگرام",
-    "EKG": "الکتروکاردیوگرام",
-    "MRI": "تصویربرداری رزونانس مغناطیسی",
+    "ECG": "نوار قلب",
+    "EKG": "نوار قلب",
+    "MRI": "ام‌آر‌آی",
     "ABG": "گازهای خون شریانی",
     "BUN": "نیتروژن اوره خون",
     "PTT": "زمان ترومبوپلاستین نسبی",
-    "INR": "نسبت بین‌المللی نرمال‌شده",
+    "INR": "آی‌ان‌آر",
     "CHF": "نارسایی احتقانی قلب",
     "DVT": "ترومبوز ورید عمقی",
     "DKA": "کتواسیدوز دیابتی",
@@ -62,6 +137,7 @@ MEDICAL_ABBREVIATIONS: dict[str, str] = {
     "NPO": "ناشتا",
     "PRN": "در صورت نیاز",
     "mmHg": "میلی‌متر جیوه",
+    "cmH2O": "سانتی‌متر آب",
     "mcg": "میکروگرم",
     "mEq": "میلی‌اکی‌والان",
     "bpm": "ضربان در دقیقه",
@@ -69,6 +145,7 @@ MEDICAL_ABBREVIATIONS: dict[str, str] = {
     "Hct": "هماتوکریت",
     "WBC": "گلبول‌های سفید",
     "RBC": "گلبول‌های قرمز",
+    "PLT": "پلاکت",
     "CO2": "دی‌اکسید کربن",
     "MI": "انفارکتوس میوکارد",
     "PE": "آمبولی ریه",
@@ -78,6 +155,7 @@ MEDICAL_ABBREVIATIONS: dict[str, str] = {
     "IV": "داخل وریدی",
     "IM": "داخل عضلانی",
     "SC": "زیر جلدی",
+    "PO": "خوراکی",
     "CT": "سی‌تی‌اسکن",
     "NG": "نازوگاستریک",
     "BE": "کسری باز",
@@ -97,6 +175,46 @@ MEDICAL_ABBREVIATIONS: dict[str, str] = {
     "L": "لیتر",
 }
 
+# Letter/digit spelling for leftover Latin tokens (e.g. rare acronyms)
+_LATIN_CHAR_FA: dict[str, str] = {
+    "A": "ای",
+    "B": "بی",
+    "C": "سی",
+    "D": "دی",
+    "E": "ای",
+    "F": "اف",
+    "G": "جی",
+    "H": "اچ",
+    "I": "آی",
+    "J": "جی",
+    "K": "کی",
+    "L": "ال",
+    "M": "ام",
+    "N": "ان",
+    "O": "او",
+    "P": "پی",
+    "Q": "کیو",
+    "R": "آر",
+    "S": "اس",
+    "T": "تی",
+    "U": "یو",
+    "V": "وی",
+    "W": "دبلیو",
+    "X": "ایکس",
+    "Y": "وای",
+    "Z": "زد",
+    "0": "صفر",
+    "1": "یک",
+    "2": "دو",
+    "3": "سه",
+    "4": "چهار",
+    "5": "پنج",
+    "6": "شش",
+    "7": "هفت",
+    "8": "هشت",
+    "9": "نه",
+}
+
 # Pre-sorted by length descending (longest abbreviation replaced first)
 _SORTED_ABBREVIATIONS = sorted(MEDICAL_ABBREVIATIONS.items(), key=lambda x: -len(x[0]))
 
@@ -104,14 +222,208 @@ _SORTED_ABBREVIATIONS = sorted(MEDICAL_ABBREVIATIONS.items(), key=lambda x: -len
 # ─── Text Processing ──────────────────────────────────────────────────────────
 
 def replace_abbreviations(text: str) -> str:
-    """Replace medical abbreviations with Persian before translation.
+    """Replace medical abbreviations with Persian (longest match first).
 
-    Processes longest abbreviations first to prevent partial matches
-    (e.g. ETCO2 before CO2, PaCO2 before CO2).
+    Short tokens (len <= 2) stay case-sensitive to avoid false positives
+    (e.g. ``OR`` must not replace English ``or``).
+    Longer tokens are matched case-insensitively (``spo2`` → اشباع اکسیژن).
     """
     for abbr, persian in _SORTED_ABBREVIATIONS:
-        text = re.sub(r"\b" + re.escape(abbr) + r"\b", persian, text)
+        pattern = r"\b" + re.escape(abbr) + r"\b"
+        if len(abbr) <= 2:
+            text = re.sub(pattern, persian, text)
+        else:
+            text = re.sub(pattern, persian, text, flags=re.IGNORECASE)
     return text
+
+
+def _spell_latin_token(token: str) -> str:
+    """Spell leftover Latin/digit tokens so TTS does not invent English words."""
+    if not token:
+        return token
+    # Keep pure numbers; persian digit map runs later.
+    if token.isdigit():
+        return token
+    chars = [_LATIN_CHAR_FA.get(ch.upper(), ch) for ch in token if ch.isalnum()]
+    return "‌".join(chars) if chars else token
+
+
+def _should_spell_latin_token(token: str) -> bool:
+    """Only spell acronym-like leftovers; leave normal lowercase words alone."""
+    letters = [c for c in token if c.isalpha()]
+    if len(token) < 2 or not letters:
+        return False
+    if any(c.isdigit() for c in token):
+        return True
+    upper = sum(1 for c in letters if c.isupper())
+    # All-caps or mostly-caps short tokens (SpO2-style already handled earlier)
+    if upper == len(letters):
+        return True
+    if len(token) <= 5 and upper >= max(1, len(letters) // 2):
+        return True
+    return False
+
+
+def expand_remaining_latin_for_speech(text: str) -> str:
+    """Spell remaining Latin acronym-like tokens in Persian letters."""
+
+    def _repl(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if not _should_spell_latin_token(token):
+            return token
+        return _spell_latin_token(token)
+
+    return re.sub(r"[A-Za-z][A-Za-z0-9\-]*", _repl, text)
+
+
+def _int_to_persian_words(n: int) -> str:
+    """Convert 0..9999 to spoken Persian words (medical vitals / doses)."""
+    if n < 0 or n > 9999:
+        return str(n)
+    if n < 10:
+        return _ONES_FA[n]
+    if n < 20:
+        return _TEENS_FA[n - 10]
+    if n < 100:
+        tens, ones = divmod(n, 10)
+        if ones == 0:
+            return _TENS_FA[tens]
+        return f"{_TENS_FA[tens]} و {_ONES_FA[ones]}"
+    if n < 1000:
+        hundreds, rest = divmod(n, 100)
+        if rest == 0:
+            return _HUNDREDS_FA[hundreds]
+        return f"{_HUNDREDS_FA[hundreds]} و {_int_to_persian_words(rest)}"
+    thousands, rest = divmod(n, 1000)
+    head = "هزار" if thousands == 1 else f"{_int_to_persian_words(thousands)} هزار"
+    if rest == 0:
+        return head
+    return f"{head} و {_int_to_persian_words(rest)}"
+
+
+def _number_token_to_speech(token: str, mode: str) -> str:
+    """Normalize one numeric token (optional decimal) for speech."""
+    if mode == "persian":
+        return token.translate(_PERSIAN_DIGITS)
+    if mode != "words":
+        return token  # ascii
+    if "." in token:
+        left, _, right = token.partition(".")
+        if left.isdigit() and right.isdigit() and len(left) <= 4 and len(right) <= 4:
+            left_w = _int_to_persian_words(int(left))
+            # Spell decimal digits one-by-one (e.g. 3.5 → سه ممیز پنج)
+            right_w = " ".join(_ONES_FA[int(d)] for d in right)
+            return f"{left_w} ممیز {right_w}"
+        return token
+    if token.isdigit() and len(token) <= 4:
+        return _int_to_persian_words(int(token))
+    return token
+
+
+def normalize_digits_for_speech(text: str) -> str:
+    """Normalize digits for any TTS provider.
+
+    ``TTS_DIGIT_MODE``:
+      - ``ascii`` (default): Persian/Arabic digits → 0-9. Safe for GapGPT / OpenAI TTS.
+      - ``words``: small integers → spoken Persian (بهتر برای شنیدن اعداد پزشکی).
+      - ``persian``: ASCII → Persian digits (legacy preference for some edge voices).
+    """
+    text = text.translate(_TO_ASCII_DIGITS)
+    mode = tts_digit_mode()
+
+    def _repl(match: re.Match[str]) -> str:
+        return _number_token_to_speech(match.group(0), mode)
+
+    # Integers or simple decimals (35, 3.5, 92) — not list markers already flattened
+    return re.sub(r"\d+(?:\.\d+)?", _repl, text)
+
+
+_SPEECH_LLM_SYSTEM = (
+    "تو ویرایشگر متن برای تبدیل گفتار فارسی پزشکی هستی.\n"
+    "قوانین سخت:\n"
+    "1) فقط یک پاراگراف گفتاری روان برگردان؛ بدون توضیح، بدون بولت، بدون نقل‌قول.\n"
+    "2) معنا و اعداد را عوض نکن؛ اختصارات را به فارسی گفتاری باز کن.\n"
+    "3) ترتیب طبیعی فارسی: «اشباع اکسیژن بیمار برابر 92 درصد» نه «بیمار اشباع اکسیژن برابر».\n"
+    "4) بین پارامترها ویرگول بگذار و جمله را با «است» تمام کن.\n"
+    "5) اعداد را با رقم انگلیسی (0-9) نگه دار مگر اینکه در ورودی واژه باشند.\n"
+    "مثال ورودی: بیمار SpO2 برابر 92 درصد، PEEP برابر 8 و ETCO2 برابر 35 است.\n"
+    "مثال خروجی: اشباع اکسیژن بیمار برابر 92 درصد، فشار مثبت انتهای بازدمی برابر 8، "
+    "و دی‌اکسید کربن بازدمی برابر 35 است."
+)
+
+
+def _llm_speech_normalize(text: str, timeout: int = 45) -> str:
+    """Optional OpenAI-compatible chat rewrite for speech. Raises on failure."""
+    cfg = openai_compatible_config()
+    if not cfg.configured:
+        raise RuntimeError("OPENAI_API_KEY not set for SPEECH_NORMALIZE_LLM")
+
+    model = openai_speech_llm_model()
+    response = requests.post(
+        f"{cfg.base_url}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {cfg.api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "temperature": 0.15,
+            "messages": [
+                {"role": "system", "content": _SPEECH_LLM_SYSTEM},
+                {"role": "user", "content": text[:6000]},
+            ],
+        },
+        timeout=timeout,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"Speech LLM HTTP {response.status_code}: {response.text[:300]}"
+        )
+    data = response.json()
+    content = (
+        data.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "")
+    )
+    out = (content or "").strip()
+    # Strip accidental quotes / markdown fences from some chat models
+    out = re.sub(r"^```(?:\w+)?\s*", "", out)
+    out = re.sub(r"\s*```$", "", out)
+    out = out.strip().strip("\"'«»")
+    if not out:
+        raise RuntimeError("Speech LLM returned empty content")
+    return out
+
+
+# Unique Persian vital phrases (longest first) for spoken word-order polish
+_SPOKEN_VITAL_PHRASES: tuple[str, ...] = tuple(
+    sorted({p for p in MEDICAL_ABBREVIATIONS.values() if len(p) >= 3}, key=len, reverse=True)
+)
+
+
+def polish_spoken_phrasing(text: str) -> str:
+    """Cheap rule-based polish so TTS sounds less like raw abbreviation expansion.
+
+    Example: «بیمار اشباع اکسیژن برابر 92» → «اشباع اکسیژن بیمار برابر 92»
+    """
+    if not text:
+        return text
+    out = text
+    for vital in _SPOKEN_VITAL_PHRASES:
+        out = re.sub(
+            rf"(?<!\S)بیمار\s+{re.escape(vital)}\s+برابر",
+            f"{vital} بیمار برابر",
+            out,
+        )
+    # Comma before «و <next vital>» — avoid touching «نود و دو»
+    out = re.sub(
+        r"(?<![،,])\s+و\s+(?=(?:فشار|اشباع|دی‌اکسید|دی اکسید|کسر|نمره|بای|سی‌پپ))",
+        "، و ",
+        out,
+    )
+    out = re.sub(r"\s+", " ", out).strip()
+    out = out.replace("،، و ", "، و ")
+    return out
 
 
 def clean_persian_for_tts(text: str) -> str:
@@ -124,10 +436,43 @@ def clean_persian_for_tts(text: str) -> str:
     text = re.sub(r"\n\s*[-*•]\s+", "، ", text)
     text = re.sub(r"\n\s*\d+\.\s+", "، ", text)
     text = re.sub(r"\n+", " ", text)
-    text = text.translate(_PERSIAN_DIGITS)
+    text = normalize_digits_for_speech(text)
     text = re.sub(r"[(){}\[\]<>|\\^~]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def prepare_text_for_tts(text: str, *, use_llm: bool | None = None) -> str:
+    """Full speech-prep pipeline used before any TTS provider.
+
+    1) Expand known medical abbreviations to Persian
+    2) Spell leftover Latin tokens
+    3) Clean markdown / digits / punctuation for speech
+    4) Rule-based spoken phrasing polish
+    5) Optional LLM polish when ``SPEECH_NORMALIZE_LLM=1`` (or ``use_llm=True``);
+       falls back to dictionary + phrasing on any failure
+
+    Provider-agnostic: same prep feeds edge-tts or OpenAI-compatible cloud TTS.
+    """
+    prepared = replace_abbreviations(text or "")
+    prepared = expand_remaining_latin_for_speech(prepared)
+    prepared = clean_persian_for_tts(prepared)
+    prepared = polish_spoken_phrasing(prepared)
+
+    want_llm = speech_normalize_llm_enabled() if use_llm is None else use_llm
+    if want_llm and prepared:
+        try:
+            polished = _llm_speech_normalize(prepared)
+            # Re-run digit/abbrev/phrasing safety on LLM output
+            polished = replace_abbreviations(polished)
+            polished = clean_persian_for_tts(polished)
+            polished = polish_spoken_phrasing(polished)
+            if polished:
+                print(f"Speech normalize LLM ok (model={openai_speech_llm_model()})")
+                return polished
+        except Exception as e:
+            print(f"Speech normalize LLM failed ({e}); using dictionary prep")
+    return prepared
 
 
 # ─── Translation ─────────────────────────────────────────────────────────────
@@ -179,7 +524,7 @@ def translate_to_persian(text: str) -> str:
 
 # ─── TTS ─────────────────────────────────────────────────────────────────────
 
-async def _tts_async(text: str) -> bytes:
+async def _edge_tts_async(text: str) -> bytes:
     communicate = edge_tts.Communicate(text, voice=TTS_VOICE, rate="-5%", pitch="+0Hz")
     chunks: list[bytes] = []
     async for chunk in communicate.stream():
@@ -188,32 +533,91 @@ async def _tts_async(text: str) -> bytes:
     return b"".join(chunks)
 
 
-def tts_to_mp3(text: str, timeout: int = 60) -> bytes:
-    """Convert Persian text to MP3 bytes using edge-tts.
-
-    Runs in an isolated thread to avoid asyncio event-loop conflicts
-    (safe to call from FastAPI, Streamlit, or plain scripts).
-    """
+def _edge_tts_mp3(text: str, timeout: int = 60) -> bytes:
+    """Convert Persian text to MP3 bytes using edge-tts (default / fallback)."""
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, _tts_async(text)).result(timeout=timeout)
+        return pool.submit(asyncio.run, _edge_tts_async(text)).result(timeout=timeout)
+
+
+def _openai_tts_mp3(text: str, timeout: int = 60) -> bytes:
+    """OpenAI-compatible Audio Speech API → MP3 bytes (no local GPU)."""
+    cfg = openai_compatible_config()
+    if not cfg.configured:
+        raise RuntimeError("OPENAI_API_KEY (or GAPGPT_API_KEY) is not set")
+
+    model = openai_tts_model()
+    voice = openai_tts_voice()
+
+    response = requests.post(
+        f"{cfg.base_url}/audio/speech",
+        headers={
+            "Authorization": f"Bearer {cfg.api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "input": text[:4096],
+            "voice": voice,
+            "response_format": "mp3",
+        },
+        timeout=timeout,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"OpenAI TTS HTTP {response.status_code}: {response.text[:300]}"
+        )
+    audio = response.content
+    if not audio:
+        raise RuntimeError("OpenAI TTS returned empty audio")
+    return audio
+
+
+def tts_to_mp3(text: str, timeout: int = 60) -> bytes:
+    """Convert speech-ready text to MP3.
+
+    Provider from ``TTS_PROVIDER``:
+      - ``edge`` (default): Microsoft edge-tts, no API key — always the local fallback
+      - ``openai``: OpenAI-compatible ``/audio/speech`` (OpenAI, GapGPT, …).
+        If key missing or any error → edge-tts (project never hard-depends on paid TTS)
+
+    Safe to call from FastAPI, Streamlit, or plain scripts.
+    """
+    provider = tts_provider()
+    if provider == "openai":
+        cfg = openai_compatible_config()
+        if not cfg.configured:
+            print("TTS_PROVIDER=openai but no API key; using edge-tts")
+            return _edge_tts_mp3(text, timeout=timeout)
+        try:
+            print(
+                f"TTS provider=openai base={cfg.base_url} "
+                f"model={openai_tts_model()} voice={openai_tts_voice()}"
+            )
+            return _openai_tts_mp3(text, timeout=timeout)
+        except Exception as e:
+            print(f"OpenAI-compatible TTS failed ({e}); falling back to edge-tts")
+            return _edge_tts_mp3(text, timeout=timeout)
+    if provider not in ("", "edge"):
+        print(f"Unknown TTS_PROVIDER={provider!r}; using edge-tts")
+    return _edge_tts_mp3(text, timeout=timeout)
 
 
 def english_to_persian_voice(english_text: str, timeout: int = 60) -> bytes:
-    """Full pipeline: English text → translate → clean → MP3 bytes."""
+    """Full pipeline: English text → translate → speech-prep → MP3 bytes."""
     persian = translate_to_persian(english_text)
-    clean = clean_persian_for_tts(persian)
+    clean = prepare_text_for_tts(persian)
     return tts_to_mp3(clean, timeout=timeout)
 
 
 def persian_to_voice(persian_text: str, timeout: int = 60) -> bytes:
-    """Pipeline for already-Persian text: clean → MP3 bytes."""
-    clean = clean_persian_for_tts(persian_text)
+    """Pipeline for already-Persian text: speech-prep → MP3 bytes."""
+    clean = prepare_text_for_tts(persian_text)
     return tts_to_mp3(clean, timeout=timeout)
 
 
 # ─── Object Storage (S3-compatible) ──────────────────────────────────────────
 
-def _get_s3_client() -> _S3Client:
+def _get_s3_client() -> boto3.client:
     """Return a cached S3 client (lazy singleton).
 
     Parmin must be reached **directly from this machine** — never via HTTP(S) proxy

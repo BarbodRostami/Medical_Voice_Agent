@@ -37,6 +37,39 @@ PUBLIC_API_URL=http://192.168.1.15:8000
 
 > کلیدهای Parmin Cloud از پنل Parmin بگیرید — **نه** GitHub token.
 
+### TTS (اختیاری — ابری با fallback لوکال)
+
+پیش‌فرض همیشه `edge-tts` و Whisper لوکال است. برای GapGPT / OpenAI در `.env`:
+
+```
+TTS_PROVIDER=openai
+STT_PROVIDER=local
+OPENAI_API_KEY=...
+OPENAI_BASE_URL=https://api.gapgpt.app/v1
+OPENAI_TTS_MODEL=gpt-4o-mini-tts
+OPENAI_TTS_VOICE=nova
+# TTS_DIGIT_MODE=ascii
+# SPEECH_NORMALIZE_LLM=0
+# STT_PROVIDER=openai
+# OPENAI_STT_MODEL=whisper-1
+```
+
+اگر کلید نباشد یا API خطا بدهد، سرور خودش به edge / Whisper لوکال برمی‌گردد.
+
+تست بستر بدون سرور:
+
+```
+python scripts/smoke_voice_providers.py
+python scripts/smoke_voice_providers.py --tts --provider openai
+# output → assets/audio/scratch/
+python scripts/demo_voice_ab.py
+python scripts/demo_voice_ab.py --with-llm
+# output → assets/audio/demo/
+```
+
+چک‌لیست ارائه: [VOICE_DEMO_CHECKLIST.md](VOICE_DEMO_CHECKLIST.md)  
+فهرست اسکریپت‌ها: [../scripts/README.md](../scripts/README.md)
+
 ---
 
 ## ۳. اجرای پروژه

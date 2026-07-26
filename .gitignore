@@ -20,6 +20,8 @@ db.sqlite3
 *.wav
 *.zip
 archive/
+
+# Generated / scratch audio (keep folder via .gitkeep)
 assets/data/*.pdf
 
 # Local / IDE (do not publish)
@@ -31,4 +33,5 @@ assets/data/*.pdf
 *.code-workspace
 
 # OS files
+# OS / secrets
 .DS_Store

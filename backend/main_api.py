@@ -53,7 +53,7 @@ from backend.medical_voice_utils import (
     upload_mp3_to_liara,
     upload_mp3_with_timeout,
 )
-from backend.stt_utils import detect_audio_extension, transcribe_medical_speech
+from backend.stt_utils import detect_audio_extension, transcribe_medical_audio
 
 app = FastAPI(title="Medical RAG API")
 app.middleware("http")(enforce_api_key)
@@ -697,8 +697,7 @@ def _worker_voice_input(job_id: str, audio_path: str, base_url: str) -> None:
     try:
         # Step 1: Speech-to-Text (ffmpeg normalize + Whisper with medical prompt)
         _update_job(job_id, status="processing", message="در حال تبدیل صدا به متن...")
-        whisper = _get_whisper()
-        persian_query = transcribe_medical_speech(whisper, audio_path)
+        persian_query = transcribe_medical_audio(audio_path, local_model_getter=_get_whisper)
 
         if not persian_query:
             _update_job(job_id, status="failed", message="صدایی شناسایی نشد.", error="Empty transcription")
@@ -819,8 +818,7 @@ def _worker_case_audio(case_id: str, audio_path: str, base_url: str) -> None:
     try:
         _patch_case(case_id, status="processing", message="در حال تبدیل صدا به متن...")
         _safe_log(f"[case {case_id}] STT started")
-        whisper = _get_whisper()
-        transcript = transcribe_medical_speech(whisper, audio_path)
+        transcript = transcribe_medical_audio(audio_path, local_model_getter=_get_whisper)
         if not transcript:
             _safe_log(f"[case {case_id}] FAILED: empty transcription")
             _patch_case(
