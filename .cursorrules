@@ -1,9 +1,0 @@
-# Rules for RAG Project
-
-- Use LangChain best practices (v0.2+).
-- Prefer 'langchain-ollama' for local LLM integration.
-- When working with ChromaDB, always ensure collection persistence is handled.
-- Use Pydantic v2 syntax for data models.
-- Always include type hints in Python functions.
-- If you find any deprecated LangChain imports, suggest the updated version.
-- Explain the logic behind RAG retrieval steps (Query Transformation, Re-ranking, etc.) when modifying code.

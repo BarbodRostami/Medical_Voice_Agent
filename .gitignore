@@ -16,13 +16,19 @@ db.sqlite3
 *.onnx
 *.json
 !postman/*.json
-!assets/models/*.onnx.json
 *.mp3
 *.wav
 *.zip
 archive/
 assets/data/*.pdf
 
+# Local / IDE (do not publish)
+.env
+.cursorrules
+.clauderules
+.cursor/
+.vscode/
+*.code-workspace
+
 # OS files
 .DS_Store
-.env
