@@ -58,18 +58,19 @@ def stream_from_backend(query: str):
 
 
 def get_source_count(query: str) -> int:
-    """Fetch source document count (cache hit — instant after streaming)."""
+    """Fetch source document count (cache hit after streaming finishes)."""
     try:
         resp = requests.post(
             BACKEND_URL,
             json={"query": query},
             headers=request_headers(),
-            timeout=10,
+            timeout=60,
         )
         if resp.status_code == 200:
-            return resp.json().get("source_documents_count", 0)
-    except Exception:
-        pass
+            return int(resp.json().get("source_documents_count", 0) or 0)
+        print(f"get_source_count HTTP {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        print(f"get_source_count error: {e}")
     return 0
 
 

@@ -13,10 +13,14 @@ def clean_llm_output(raw: str, query: str) -> str:
         "You are an expert medical assistant",
         "Answer the user's question",
         "Context:",
-        query[:50],
     ]:
-        if phrase in text:
+        if phrase and phrase in text:
             text = text.split(phrase)[-1]
+    # Only strip a leaked copy of the user question when it is long enough to be
+    # distinctive (short queries like "q" / "BP" would otherwise shred the answer).
+    q = (query or "").strip()
+    if len(q) >= 24 and q[:80] in text:
+        text = text.split(q[:80])[-1]
     text = text.strip().lstrip(":").strip()
     if text.lower().startswith("answer:"):
         text = text[7:].strip()

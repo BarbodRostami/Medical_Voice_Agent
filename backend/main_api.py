@@ -376,6 +376,35 @@ def _clean_llm_output(raw: str, query: str) -> str:
     return clean_llm_output(raw, query)
 
 
+def _rag_answer(query: str) -> tuple[str, int]:
+    """Shared RAG path for /chat, /chat/voice, and job workers.
+
+    Returns ``(answer_text, source_documents_count)``. Uses the in-memory LRU
+    cache when present so callers do not re-implement retrieve → prompt → LLM.
+    """
+    key = _cache_key(query)
+    cached = _get_cache(key)
+    if cached:
+        return cached["answer"], int(cached["sources"])
+
+    docs = _retrieve(query)
+    context = "\n\n---\n\n".join([doc.page_content for doc in docs])
+    prompt = _build_rag_prompt(query, context)
+    raw = llm.invoke(prompt)
+    answer = _clean_llm_output(raw, query)
+    source_count = len(docs)
+    _set_cache(key, answer, source_count)
+    _save_to_django(query, answer)
+    return answer, source_count
+
+
+def _upload_audio_url(audio_bytes: bytes, base_url: str, timeout: int = 90) -> tuple[str | None, str | None]:
+    """Upload MP3 with timeout and build the public proxy URL (shared upload pattern)."""
+    file_key = upload_mp3_with_timeout(audio_bytes, timeout=timeout)
+    audio_url = build_audio_proxy_url(base_url, file_key) if file_key else None
+    return file_key, audio_url
+
+
 def _save_to_django(question: str, answer: str) -> None:
     try:
         django_url = os.getenv("DJANGO_URL", "http://django-admin:8000/save_chat/")
@@ -423,19 +452,11 @@ async def chat(request: QuestionRequest):
 
     try:
         print(f"Question: {query}")
-        docs = _retrieve(query)
-        context = "\n\n---\n\n".join([doc.page_content for doc in docs])
-        prompt = _build_rag_prompt(query, context)
-        raw = llm.invoke(prompt)
-        answer = _clean_llm_output(raw, query)
-
-        _set_cache(key, answer, len(docs))
-        _save_to_django(query, answer)
-
+        answer, source_count = _rag_answer(query)
         return {
             "query": query,
             "answer": answer,
-            "source_documents_count": len(docs),
+            "source_documents_count": source_count,
             "cached": False,
         }
     except Exception as e:
@@ -449,7 +470,7 @@ async def chat_stream(request: QuestionRequest):
     if db is None or llm is None or bm25_retriever is None:
         raise HTTPException(status_code=500, detail="System not initialized.")
 
-        query = request.query
+    query = request.query
     key = _cache_key(query)
     cached = _get_cache(key)
 
@@ -606,13 +627,7 @@ async def chat_voice(body: QuestionRequest, req: Request):
     else:
         try:
             print(f"Chat/Voice question: {query}")
-            docs = _retrieve(query)
-            context = "\n\n---\n\n".join([doc.page_content for doc in docs])
-            prompt = _build_rag_prompt(query, context)
-            raw = llm.invoke(prompt)
-            answer = _clean_llm_output(raw, query)
-            _set_cache(key, answer, len(docs))
-            _save_to_django(query, answer)
+            answer, _source_count = _rag_answer(query)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"RAG failed: {e}")
 
@@ -652,29 +667,17 @@ def _worker_chat_voice(job_id: str, query: str, base_url: str) -> None:
     try:
         _update_job(job_id, status="processing", message="در حال جستجو در پایگاه دانش...")
 
-        # Step 1: RAG
-        key = _cache_key(query)
-        cached = _get_cache(key)
-        if cached:
-            answer = cached["answer"]
-        else:
-            docs = _retrieve(query)
-            context = "\n\n---\n\n".join([doc.page_content for doc in docs])
-            prompt = _build_rag_prompt(query, context)
-            _update_job(job_id, message="در حال تولید پاسخ با هوش مصنوعی...")
-            raw = llm.invoke(prompt)
-            answer = _clean_llm_output(raw, query)
-            _set_cache(key, answer, len(docs))
-            _save_to_django(query, answer)
+        # Step 1: RAG (shared helper — issue #12)
+        _update_job(job_id, message="در حال تولید پاسخ با هوش مصنوعی...")
+        answer, _source_count = _rag_answer(query)
 
         # Step 2: TTS (Persian answer for API + audio)
         _update_job(job_id, message="در حال تبدیل متن به صدا...")
         persian_answer, audio_bytes = _answer_to_persian_voice(answer)
 
-        # Step 3: Upload (hard 45s deadline — executor.shutdown(wait=False) avoids blocking)
+        # Step 3: Upload (shared helper — issue #12)
         _update_job(job_id, message="در حال آپلود فایل صوتی...")
-        file_key = upload_mp3_with_timeout(audio_bytes)
-        audio_url = build_audio_proxy_url(base_url, file_key) if file_key else None
+        _file_key, audio_url = _upload_audio_url(audio_bytes, base_url)
 
         _update_job(
             job_id,
@@ -706,21 +709,10 @@ def _worker_voice_input(job_id: str, audio_path: str, base_url: str) -> None:
         query = translate_to_english(persian_query)
         print(f"Translated query (en): {query[:80]}")
 
-        # Step 3: RAG
+        # Step 3: RAG (shared helper)
         _update_job(job_id, message="در حال جستجو در پایگاه دانش...", answer=None)
-        key = _cache_key(query)
-        cached = _get_cache(key)
-        if cached:
-            answer = cached["answer"]
-        else:
-            docs = _retrieve(query)
-            context = "\n\n---\n\n".join([doc.page_content for doc in docs])
-            prompt = _build_rag_prompt(query, context)
-            _update_job(job_id, message="در حال تولید پاسخ با هوش مصنوعی...")
-            raw = llm.invoke(prompt)
-            answer = _clean_llm_output(raw, query)
-            _set_cache(key, answer, len(docs))
-            _save_to_django(query, answer)
+        _update_job(job_id, message="در حال تولید پاسخ با هوش مصنوعی...")
+        answer, _source_count = _rag_answer(query)
 
         if not answer or len(answer.strip()) < 5:
             _update_job(
@@ -739,8 +731,7 @@ def _worker_voice_input(job_id: str, audio_path: str, base_url: str) -> None:
 
         # Step 5: Upload
         _update_job(job_id, message="در حال آپلود فایل صوتی...")
-        file_key = upload_mp3_with_timeout(audio_bytes)
-        audio_url = build_audio_proxy_url(base_url, file_key) if file_key else None
+        _file_key, audio_url = _upload_audio_url(audio_bytes, base_url)
 
         _update_job(
             job_id,
@@ -771,8 +762,7 @@ def _worker_voice(job_id: str, full_text: str, base_url: str) -> None:
         audio_bytes = persian_to_voice(full_text)
 
         _update_job(job_id, message="در حال آپلود فایل صوتی...")
-        file_key = upload_mp3_with_timeout(audio_bytes)
-        audio_url = build_audio_proxy_url(base_url, file_key) if file_key else None
+        _file_key, audio_url = _upload_audio_url(audio_bytes, base_url)
 
         _update_job(job_id, status="done", message="تکمیل شد.", audio_url=audio_url)
 
