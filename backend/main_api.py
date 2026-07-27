@@ -24,7 +24,6 @@ import uvicorn
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from langchain_chroma import Chroma
-from langchain_community.llms import Ollama as OllamaLLM
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -47,6 +46,12 @@ from backend.case_store import (
     validate_case_id,
 )
 from backend.llm_output import clean_llm_output
+from backend.llm_provider import (
+    AnswerLLM,
+    build_rag_messages,
+    create_answer_llm,
+)
+from backend.provider_config import llm_provider
 from backend.medical_voice_utils import (
     build_audio_proxy_url,
     download_mp3_from_storage,
@@ -58,7 +63,7 @@ from backend.medical_voice_utils import (
     upload_mp3_to_liara,
     upload_mp3_with_timeout,
 )
-from backend.stt_utils import detect_audio_extension, transcribe_medical_audio
+from backend.stt_utils import detect_audio_extension, transcribe_medical_audio, transcribe_form_demographics_audio
 
 
 def _api_docs_enabled() -> bool:
@@ -87,7 +92,6 @@ app.middleware("http")(enforce_api_key)
 PERSIST_DIRECTORY = "db"  
 # Must match the model used in ingestion.py (MedCPT — a medical-domain encoder)
 EMBEDDING_MODEL = "ncbi/MedCPT-Article-Encoder"
-LLM_MODEL = "biomistral:latest" 
 RETRIEVE_K = 5       # final number of chunks returned
 FETCH_K = 20         # candidates for MMR to diversify from
 
@@ -279,7 +283,7 @@ class CaseTextRequest(BaseModel):
 
 
 db = None
-llm = None
+llm: AnswerLLM | None = None
 bm25_retriever = None
 vector_retriever = None
 
@@ -317,12 +321,7 @@ try:
 
     print("Hybrid retriever (BM25 + MMR) ready.")
 
-    llm = OllamaLLM(
-        model=LLM_MODEL,
-        base_url=OLLAMA_HOST,
-        temperature=0.1,
-        stop=["<|im_start|>", "<|im_end|>", "user:", "assistant:"],
-    )
+    llm = create_answer_llm(ollama_host=OLLAMA_HOST)
     print("Models loaded successfully!")
     if configured_api_key():
         print("API key auth ENABLED (header X-API-Key required except / and /voice/audio/*).")
@@ -378,25 +377,6 @@ def _retrieve(query: str) -> list[Document]:
 
 # ─── Prompt ───────────────────────────────────────────────────────────────────
 
-def _build_rag_prompt(query: str, context: str) -> str:
-    return (
-        "<|im_start|>system\n"
-        "You are an expert medical assistant specialized in critical care and clinical medicine.\n"
-        "Answer the user's question using ONLY the provided context.\n\n"
-        "Answer format rules:\n"
-        "1. Always state exact normal ranges or values when relevant (include units).\n"
-        "2. If the question asks about pediatric vs adult differences, mention both.\n"
-        "3. Write in clear, concise prose. No markdown headers or bullet dashes.\n"
-        "4. Use numbered lists only when listing 3+ distinct items.\n"
-        "5. If the context does not contain enough information, say exactly: "
-        "'The provided documents do not contain enough information to answer this question.'\n\n"
-        f"Context:\n{context}<|im_end|>\n"
-        "<|im_start|>user\n"
-        f"{query}<|im_end|>\n"
-        "<|im_start|>assistant\n"
-    )
-
-
 def _clean_llm_output(raw: str, query: str) -> str:
     """Backward-compatible wrapper around clean_llm_output."""
     return clean_llm_output(raw, query)
@@ -405,9 +385,14 @@ def _clean_llm_output(raw: str, query: str) -> str:
 def _rag_answer(query: str) -> tuple[str, int]:
     """Shared RAG path for /chat, /chat/voice, and job workers.
 
+    Retrieval: hybrid BM25 + MMR → RRF. Generation: ``LLM_PROVIDER``
+    (``openai`` = GapGPT/OpenAI-compatible chat, else Ollama BioMistral).
+
     Returns ``(answer_text, source_documents_count)``. Uses the in-memory LRU
     cache when present so callers do not re-implement retrieve → prompt → LLM.
     """
+    if llm is None:
+        raise RuntimeError("LLM not initialized")
     key = _cache_key(query)
     cached = _get_cache(key)
     if cached:
@@ -415,8 +400,8 @@ def _rag_answer(query: str) -> tuple[str, int]:
 
     docs = _retrieve(query)
     context = "\n\n---\n\n".join([doc.page_content for doc in docs])
-    prompt = _build_rag_prompt(query, context)
-    raw = llm.invoke(prompt)
+    messages = build_rag_messages(query, context)
+    raw = llm.invoke_messages(messages)
     answer = _clean_llm_output(raw, query)
     source_count = len(docs)
     _set_cache(key, answer, source_count)
@@ -449,9 +434,11 @@ class QuestionRequest(BaseModel):
 
 @app.get("/")
 def home():
+    model_name = llm.active_model if llm is not None else None
     return {
         "message": "Medical RAG API is running!",
-        "model": LLM_MODEL,
+        "llm_provider": llm_provider() if llm is not None else None,
+        "model": model_name,
         "embedding_model": EMBEDDING_MODEL,
         "retriever": "Hybrid BM25 + MMR",
         "db_loaded": db is not None,
@@ -507,45 +494,22 @@ async def chat_stream(request: QuestionRequest):
 
     docs = _retrieve(query)
     context = "\n\n---\n\n".join([doc.page_content for doc in docs])
-    prompt = _build_rag_prompt(query, context)
+    messages = build_rag_messages(query, context)
     source_count = len(docs)
 
-    def _stream_ollama():
+    def _stream_tokens():
         full_text = ""
-        try:
-            resp = requests.post(
-                f"{OLLAMA_HOST}/api/generate",
-                json={
-                    "model": LLM_MODEL,
-                    "prompt": prompt,
-                    "stream": True,
-                    "options": {
-                        "temperature": 0.1,
-                        "stop": ["<|im_start|>", "<|im_end|>", "user:", "assistant:"],
-                    },
-                },
-                stream=True,
-                timeout=180,
-            )
-            for line in resp.iter_lines():
-                if not line:
-                    continue
-                data = json.loads(line)
-                token = data.get("response", "")
-                if token:
-                    full_text += token
-                    yield token
-                if data.get("done"):
-                    break
-        except Exception as e:
-            yield f"\n[Error: {e}]"
+        assert llm is not None
+        for token in llm.stream_messages(messages):
+            full_text += token
+            yield token
+        if full_text.startswith("\n[Error:"):
             return
-
         clean = _clean_llm_output(full_text, query)
         _set_cache(key, clean, source_count)
         _save_to_django(query, clean)
 
-    return StreamingResponse(_stream_ollama(), media_type="text/plain; charset=utf-8")
+    return StreamingResponse(_stream_tokens(), media_type="text/plain; charset=utf-8")
 
 
 @app.post("/translate")
@@ -554,15 +518,20 @@ async def translate_text(request: QuestionRequest):
     if llm is None:
         raise HTTPException(status_code=500, detail="LLM not initialized.")
     try:
-        prompt = (
-            "<|im_start|>system\n"
-            "You are a professional medical translator (English to Persian/Farsi). "
-            "Return ONLY the Persian translation, nothing else.<|im_end|>\n"
-            "<|im_start|>user\n"
-            f"Translate to Persian:\n{request.query}<|im_end|>\n"
-            "<|im_start|>assistant\n"
-        )
-        translation = llm.invoke(prompt).strip().lstrip(":").strip()
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a professional medical translator (English to Persian/Farsi). "
+                    "Return ONLY the Persian translation, nothing else."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"Translate to Persian:\n{request.query}",
+            },
+        ]
+        translation = llm.invoke_messages(messages).strip().lstrip(":").strip()
         for tag in ("<|im_start|>", "<|im_end|>", "assistant", "user"):
             translation = translation.replace(tag, "").strip()
         return {"translation": translation, "original": request.query}
@@ -1215,6 +1184,46 @@ async def get_msg(uuid: str):
     if meta is None:
         raise HTTPException(status_code=404, detail="Case not found.")
     return _case_public_view(meta)
+
+
+@app.post(
+    "/experiments/voice-form/stt",
+    summary="EXPERIMENT: voice → demographics transcript + form fields",
+)
+async def experiment_voice_form_stt(file: UploadFile = File(...)):
+    """Isolated form-fill STT (does not change HakimAI /api/cases).
+
+    Uses a demographics-biased Whisper prompt, then extracts gender/age/height.
+    """
+    from backend.experiments.form_extract import extract_patient_demographics
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty audio upload.")
+    suffix = detect_audio_extension(raw, file.filename, file.content_type)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(raw)
+        tmp_path = tmp.name
+    try:
+        transcript = transcribe_form_demographics_audio(
+            tmp_path,
+            local_model_getter=_get_whisper,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"STT failed: {e}") from e
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+    # Soft empty: UI asks user to speak again (avoid scary 422 in the browser).
+    fields = extract_patient_demographics(transcript or "")
+    return {
+        "transcript": transcript or "",
+        "fields": fields,
+        "experiment": True,
+        "ok": bool(transcript),
+    }
 
 
 @app.get(

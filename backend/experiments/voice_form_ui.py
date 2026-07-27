@@ -1,45 +1,94 @@
 """
-EXPERIMENT — Voice → fill patient demographics form (gender / age / height).
+EXPERIMENT — Minimal voice → patient form UI.
 
-Isolated from production UI. Does **not** change HakimAI or main RAG flows.
+Flow:
+  1. Nearly empty page; plays greeting TTS once
+  2. Mic capture + optional audio upload
+  3. After successful extract → show filled fields only
 
-Prerequisites:
-  1. Backend running (for STT via /api/cases):
-       uvicorn backend.main_api:app --host 0.0.0.0 --port 8000
-  2. From project root:
-       streamlit run backend/experiments/voice_form_ui.py
-
-You can also paste transcript text only (no mic) to test extraction.
+Run (backend on :8000):
+  streamlit run backend/experiments/voice_form_ui.py --server.port 8502
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import os
 import tempfile
-import time
-import uuid
 from pathlib import Path
 
 import requests
 import streamlit as st
+from dotenv import load_dotenv
 
-from backend.api_auth import request_headers
-from backend.experiments.form_extract import (
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(_PROJECT_ROOT / ".env")
+
+import importlib
+
+from backend.experiments import form_extract as _form_extract
+
+importlib.reload(_form_extract)
+from backend.experiments.form_extract import (  # noqa: E402
+    FIELD_LABELS_FA,
     extract_patient_demographics,
-    gender_label_fa,
+    format_field_value,
 )
+from backend.api_auth import request_headers
+from backend.medical_voice_utils import persian_to_voice
 from backend.stt_utils import detect_audio_extension
 
 API_BASE = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
-POLL_SEC = 2
 MAX_WAIT = 180
+GREETING = "سلام، چطوری می‌تونم کمکتون کنم؟"
 
-GENDER_OPTIONS = ["", "مرد", "زن"]
-GENDER_TO_VALUE = {"": None, "مرد": "male", "زن": "female"}
 VALUE_TO_GENDER = {None: "", "male": "مرد", "female": "زن"}
 
+_HIDE_CHROME = """
+<style>
+  header, footer, [data-testid="stToolbar"], [data-testid="stDecoration"],
+  [data-testid="stStatusWidget"], #MainMenu { visibility: hidden; height: 0; }
+  .block-container { padding-top: 3rem !important; max-width: 520px; }
+  [data-testid="stAudioInput"] label { display: none !important; }
+  div[data-testid="stVerticalBlock"] > div:has([data-testid="stAudioInput"]) {
+    display: flex; justify-content: center;
+  }
+  .result-card {
+    margin-top: 1.5rem;
+    padding: 1.25rem 1.5rem;
+    border: 1px solid rgba(128,128,128,0.35);
+    border-radius: 12px;
+    direction: rtl;
+    text-align: right;
+  }
+  .result-card h3 {
+    margin: 0 0 0.85rem 0;
+    font-size: 1.05rem;
+    opacity: 0.85;
+  }
+  .result-card .row { margin: 0.45rem 0; font-size: 1.02rem; }
+  .result-card .label { opacity: 0.6; margin-left: 0.45rem; }
+  .result-card .section {
+    margin-top: 0.9rem;
+    padding-top: 0.65rem;
+    border-top: 1px solid rgba(128,128,128,0.25);
+    font-size: 0.85rem;
+    opacity: 0.7;
+  }
+  .listening-hint {
+    text-align: center; opacity: 0.45; font-size: 0.9rem; margin-top: 1rem;
+    direction: rtl;
+  }
+</style>
+"""
 
-def _transcribe_via_cases(audio_bytes: bytes, filename: str, content_type: str | None) -> str:
-    """Use existing collaborator STT path (no RAG)."""
+
+def _transcribe_via_form_stt(
+    audio_bytes: bytes,
+    filename: str,
+    content_type: str | None,
+) -> str:
+    load_dotenv(_PROJECT_ROOT / ".env", override=False)
     ext = detect_audio_extension(audio_bytes, filename, content_type)
     safe_name = filename if filename and Path(filename).suffix else f"recording{ext}"
     mime = content_type or {
@@ -50,173 +99,186 @@ def _transcribe_via_cases(audio_bytes: bytes, filename: str, content_type: str |
         ".m4a": "audio/mp4",
     }.get(ext, "application/octet-stream")
 
-    case_id = f"form-exp-{uuid.uuid4().hex[:12]}"
+    headers = request_headers()
     with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
         tmp.write(audio_bytes)
         path = tmp.name
     try:
         with open(path, "rb") as f:
             r = requests.post(
-                f"{API_BASE}/api/cases",
+                f"{API_BASE}/experiments/voice-form/stt",
                 files={"file": (safe_name, f, mime)},
-                data={"uuid": case_id},
-                headers=request_headers(),
-                timeout=60,
+                headers=headers,
+                timeout=MAX_WAIT,
             )
-        r.raise_for_status()
+        if r.status_code == 401:
+            raise RuntimeError(
+                "کلید API قبول نشد. مطمئن شو فایل .env برای Streamlit و backend یکی است."
+            )
+        if r.status_code == 404:
+            raise RuntimeError("Backend را ری‌استارت کنید (endpoint آزمایشی موجود نیست).")
+        if r.status_code >= 400:
+            try:
+                detail = r.json().get("detail") or r.text[:200]
+            except Exception:
+                detail = r.text[:200]
+            raise RuntimeError(f"خطای سرور ({r.status_code}): {detail}")
+        return (r.json().get("transcript") or "").strip()
     finally:
         try:
             os.remove(path)
         except OSError:
             pass
 
-    start = time.time()
-    while time.time() - start < MAX_WAIT:
-        s = requests.get(
-            f"{API_BASE}/api/get-msg",
-            params={"uuid": case_id},
-            headers=request_headers(),
-            timeout=15,
-        )
-        s.raise_for_status()
-        data = s.json()
-        status = data.get("status")
-        if status == "ready":
-            return (data.get("text") or data.get("transcript") or "").strip()
-        if status == "failed":
-            raise RuntimeError(data.get("error") or "STT failed")
-        time.sleep(POLL_SEC)
-    raise TimeoutError("STT timed out")
 
-
-def _apply_to_session(parsed: dict) -> None:
-    st.session_state["form_gender"] = VALUE_TO_GENDER.get(parsed.get("gender"), "")
-    st.session_state["form_age"] = (
-        int(parsed["age"]) if parsed.get("age") is not None else None
+def _play_mp3_with_gesture(mp3: bytes) -> None:
+    b64 = base64.b64encode(mp3).decode("ascii")
+    st.components.v1.html(
+        f"""
+        <div id="tap" style="position:fixed;inset:0;z-index:9999;cursor:pointer;"></div>
+        <audio id="greet" preload="auto">
+          <source src="data:audio/mpeg;base64,{b64}" type="audio/mpeg" />
+        </audio>
+        <script>
+          const a = document.getElementById("greet");
+          const tap = document.getElementById("tap");
+          const tryPlay = () => a.play().then(() => tap.remove()).catch(() => {{}});
+          tryPlay();
+          tap.addEventListener("click", () => {{ tryPlay(); }}, {{ once: true }});
+          window.addEventListener("pointerdown", () => {{ tryPlay(); }}, {{ once: true }});
+        </script>
+        """,
+        height=0,
     )
-    st.session_state["form_height"] = (
-        int(parsed["height_cm"]) if parsed.get("height_cm") is not None else None
-    )
-    st.session_state["form_transcript"] = parsed.get("raw_text") or ""
-    st.session_state["form_missing"] = parsed.get("missing") or []
 
 
-st.set_page_config(page_title="آزمایش فرم از ویس", page_icon="🧪", layout="centered")
-st.title("🧪 آزمایش: پر کردن فرم از ویس")
-st.caption(
-    "برنچ آزمایشی — روی قرارداد HakimAI اثری ندارد. "
-    f"Backend: `{API_BASE}`"
-)
+def _ensure_greeting() -> None:
+    if st.session_state.get("greeting_ready"):
+        return
+    try:
+        st.session_state["greeting_mp3"] = persian_to_voice(GREETING, timeout=90)
+    except Exception as e:
+        st.session_state["greeting_mp3"] = None
+        st.session_state["greeting_error"] = str(e)
+    st.session_state["greeting_ready"] = True
 
-with st.sidebar:
-    st.markdown("### راه‌اندازی")
-    st.code("uvicorn backend.main_api:app --host 0.0.0.0 --port 8000")
-    st.code("streamlit run backend/experiments/voice_form_ui.py")
-    st.info("فیلدها: جنس · سن · قد (cm)")
 
-# Defaults once
+def _process_audio(audio_bytes: bytes, audio_name: str, rec_type: str | None) -> None:
+    digest = hashlib.sha256(audio_bytes).hexdigest()
+    if digest == st.session_state["last_audio_hash"] or len(audio_bytes) <= 200:
+        return
+    st.session_state["last_audio_hash"] = digest
+    st.session_state["phase"] = "processing"
+    st.session_state["error"] = ""
+    try:
+        text = _transcribe_via_form_stt(audio_bytes, audio_name, rec_type)
+        if not text:
+            st.session_state["error"] = (
+                "چیزی شنیده نشد. بلندتر و کامل‌تر بگویید "
+                "(مثلاً بیمار خانم سی و دو ساله قد صد و شصت)."
+            )
+            st.session_state["phase"] = "listen"
+        else:
+            parsed = extract_patient_demographics(text)
+            if parsed.get("found"):
+                st.session_state["result"] = parsed
+                st.session_state["phase"] = "result"
+            else:
+                st.session_state["error"] = (
+                    f"شنیدم «{text}» ولی فیلدی استخراج نشد. دوباره بگویید."
+                )
+                st.session_state["phase"] = "listen"
+    except Exception as e:
+        st.session_state["error"] = str(e)
+        st.session_state["phase"] = "listen"
+    st.rerun()
+
+
+st.set_page_config(page_title=" ", layout="centered", initial_sidebar_state="collapsed")
+st.markdown(_HIDE_CHROME, unsafe_allow_html=True)
+
 for key, default in (
-    ("form_gender", ""),
-    ("form_age", None),
-    ("form_height", None),
-    ("form_transcript", ""),
-    ("form_missing", []),
+    ("phase", "listen"),
+    ("greeting_ready", False),
+    ("greeting_mp3", None),
+    ("greeting_played", False),
+    ("last_audio_hash", ""),
+    ("result", None),
+    ("error", ""),
 ):
     if key not in st.session_state:
         st.session_state[key] = default
 
-st.subheader("۱) ورودی")
-mode = st.radio("روش", ["ضبط / آپلود ویس", "فقط متن (بدون STT)"], horizontal=True)
+_ensure_greeting()
 
-transcript_in = ""
-if mode == "فقط متن (بدون STT)":
-    transcript_in = st.text_area(
-        "متن شنیده‌شده (یا فرضی)",
-        value="بیمار آقای ۴۵ ساله با قد ۱۷۵ سانتی‌متر",
-        height=100,
+if not st.session_state["greeting_played"]:
+    mp3 = st.session_state.get("greeting_mp3")
+    if mp3:
+        _play_mp3_with_gesture(mp3)
+    st.session_state["greeting_played"] = True
+
+phase = st.session_state["phase"]
+
+if phase == "result" and st.session_state.get("result"):
+    r = st.session_state["result"]
+    rows: list[str] = []
+    for key, label in FIELD_LABELS_FA.items():
+        if key not in (r.get("found") or []):
+            continue
+        val = format_field_value(key, r.get(key))
+        rows.append(
+            f'<div class="row"><span class="label">{label}</span>'
+            f"<strong>{val}</strong></div>"
+        )
+    transcript = (r.get("raw_text") or "").strip()
+    transcript_html = (
+        f'<div class="section">متن: {transcript}</div>' if transcript else ""
     )
-    if st.button("استخراج و پر کردن فرم", type="primary"):
-        _apply_to_session(extract_patient_demographics(transcript_in))
-        st.success("فرم به‌روز شد.")
-else:
     st.markdown(
-        "مثال بگویید: «بیمار خانم ۳۲ ساله، قد ۱۶۰ سانتی‌متر»"
+        f"""
+        <div class="result-card" dir="rtl">
+          <h3>اطلاعات استخراج‌شده</h3>
+          {"".join(rows) if rows else "<div class='row'>—</div>"}
+          {transcript_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
-    audio_data = None
-    audio_name = "recording.wav"
-    rec_type: str | None = None
+    st.markdown("<div style='height:1.5rem'></div>", unsafe_allow_html=True)
+    if st.button("دوباره", use_container_width=True):
+        st.session_state["phase"] = "listen"
+        st.session_state["result"] = None
+        st.session_state["last_audio_hash"] = ""
+        st.session_state["error"] = ""
+        st.session_state["greeting_played"] = False
+        st.rerun()
 
+elif phase == "processing":
+    st.markdown('<p class="listening-hint">...</p>', unsafe_allow_html=True)
+
+else:
     if hasattr(st, "audio_input"):
-        rec = st.audio_input("ضبط از میکروفون")
+        rec = st.audio_input(" ", label_visibility="collapsed", key="mic")
         if rec is not None:
-            audio_data = rec.getvalue() if hasattr(rec, "getvalue") else rec.read()
-            audio_name = getattr(rec, "name", None) or "recording.webm"
-            rec_type = getattr(rec, "type", None)
+            audio_bytes = rec.getvalue() if hasattr(rec, "getvalue") else rec.read()
+            _process_audio(
+                audio_bytes,
+                getattr(rec, "name", None) or "recording.webm",
+                getattr(rec, "type", None),
+            )
 
-    uploaded = st.file_uploader("یا فایل صوتی", type=["mp3", "wav", "m4a", "ogg", "webm"])
+    uploaded = st.file_uploader(
+        "آپلود ویس",
+        type=["wav", "mp3", "m4a", "ogg", "webm"],
+        label_visibility="collapsed",
+        key="upload_audio",
+    )
+    st.markdown(
+        '<p class="listening-hint">ضبط یا آپلود فایل صوتی</p>',
+        unsafe_allow_html=True,
+    )
     if uploaded is not None:
-        audio_data = uploaded.read()
-        audio_name = uploaded.name
-        rec_type = uploaded.type
+        _process_audio(uploaded.read(), uploaded.name, uploaded.type)
 
-    if st.button("🎤 ویس → فرم", type="primary", disabled=audio_data is None):
-        with st.spinner("در حال تشخیص گفتار..."):
-            try:
-                text = _transcribe_via_cases(audio_data, audio_name, rec_type)
-            except Exception as e:
-                st.error(f"خطای STT: {e}")
-                st.stop()
-        if not text:
-            st.warning("متنی تشخیص داده نشد.")
-            st.stop()
-        parsed = extract_patient_demographics(text)
-        _apply_to_session(parsed)
-        st.success("فرم از روی ویس پر شد.")
-
-st.subheader("۲) متن تشخیص‌داده‌شده")
-st.info(st.session_state["form_transcript"] or "— هنوز چیزی نیست —")
-if st.session_state["form_missing"]:
-    st.caption("یافت‌نشده: " + ", ".join(st.session_state["form_missing"]))
-
-st.subheader("۳) اطلاعات بیمار")
-with st.form("patient_demo_form"):
-    gender_label = st.selectbox(
-        "جنس *",
-        options=GENDER_OPTIONS,
-        index=GENDER_OPTIONS.index(st.session_state["form_gender"])
-        if st.session_state["form_gender"] in GENDER_OPTIONS
-        else 0,
-        format_func=lambda x: "انتخاب کنید" if x == "" else x,
-    )
-    age_val = st.number_input(
-        "سن * (سال)",
-        min_value=0,
-        max_value=130,
-        value=int(st.session_state["form_age"] or 0),
-        step=1,
-    )
-    height_val = st.number_input(
-        "قد (cm)",
-        min_value=0,
-        max_value=250,
-        value=int(st.session_state["form_height"] or 0),
-        step=1,
-    )
-    submitted = st.form_submit_button("ثبت / نمایش")
-
-if submitted:
-    st.session_state["form_gender"] = gender_label
-    st.session_state["form_age"] = age_val or None
-    st.session_state["form_height"] = height_val or None
-    st.json(
-        {
-            "gender": GENDER_TO_VALUE.get(gender_label),
-            "gender_fa": gender_label or None,
-            "age": age_val or None,
-            "height_cm": height_val or None,
-            "transcript": st.session_state["form_transcript"],
-        }
-    )
-
-st.divider()
-st.caption(f"استخراج نمونه: {gender_label_fa('male')} / سن / قد — فقط آزمایش")
+    if st.session_state.get("error"):
+        st.caption(st.session_state["error"])

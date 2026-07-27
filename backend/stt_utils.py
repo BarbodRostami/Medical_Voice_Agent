@@ -30,6 +30,17 @@ WHISPER_MEDICAL_PROMPT_FA = (
     "کاپنوگرافی، ونتیلاتور."
 )
 
+# Experiment: voice → HakimAI-like patient tab. Does not affect HakimAI API.
+WHISPER_FORM_PROMPT_FA = (
+    "فرم بیمار ICU به فارسی. "
+    "جنس مرد یا زن، سن ساله، قد سانتی‌متر، وزن کیلوگرم. "
+    "ونتیلاتور چند روز، لوله ETT یا تراک، اندیکاسیون الکتیو یا اورژانس، RASS. "
+    "تشخیص اصلی، دسته مثل ARDS یا پنومونی، تب، جراحی اخیر، sedation، "
+    "شدت ترشحات، خلاصه CXR. "
+    "مثال: بیمار خانم سی و دو ساله قد صد و شصت وزن هفتاد، سه روز ونتیلاتور، "
+    "لوله ETT، تشخیص ARDS، تب دارد."
+)
+
 # Conservative fixes for frequent short-utterance Whisper FA mistakes.
 _TRANSCRIPT_PHRASE_FIXES: tuple[tuple[str, str], ...] = (
     ("ایک دوسر", "یک دو سه"),
@@ -38,6 +49,20 @@ _TRANSCRIPT_PHRASE_FIXES: tuple[tuple[str, str], ...] = (
     ("یک دو سر", "یک دو سه"),
     ("دوسر", "دو سه"),
     ("ایک ", "یک "),
+)
+
+# Extra STT cleanup for demographics form experiment only.
+_FORM_TRANSCRIPT_FIXES: tuple[tuple[str, str], ...] = (
+    ("سیودو", "سی و دو"),
+    ("سیو دو", "سی و دو"),
+    ("سی ودو", "سی و دو"),
+    ("چهل‌وپنج", "چهل و پنج"),
+    ("چهل وپنج", "چهل و پنج"),
+    ("چهل‌و پنج", "چهل و پنج"),
+    ("بیست‌و", "بیست و"),
+    ("خانوم", "خانم"),
+    ("سانتیمتر", "سانتی متر"),
+    ("سانتی‌متر", "سانتی متر"),
 )
 
 _MIME_TO_EXT: dict[str, str] = {
@@ -134,27 +159,36 @@ def _beam_size() -> int:
     return max(1, min(n, 20))
 
 
-def normalize_transcript_fa(text: str) -> str:
+def normalize_transcript_fa(
+    text: str,
+    extra_fixes: tuple[tuple[str, str], ...] = (),
+) -> str:
     """Light cleanup + known short-phrase fixes (does not invent medical content)."""
     cleaned = re.sub(r"\s+", " ", (text or "").strip())
     if not cleaned:
         return cleaned
-    for bad, good in _TRANSCRIPT_PHRASE_FIXES:
+    for bad, good in _TRANSCRIPT_PHRASE_FIXES + tuple(extra_fixes):
         cleaned = cleaned.replace(bad, good)
     return cleaned.strip(" ،,")
 
 
-def _whisper_transcribe(model, audio_path: str, language: str | None) -> str:
+def _whisper_transcribe(
+    model: Any,
+    audio_path: str,
+    language: str | None,
+    initial_prompt: str | None = None,
+    vad_filter: bool = True,
+) -> str:
     beam = _beam_size()
     kwargs: dict = dict(
         beam_size=beam,
         best_of=beam,
         patience=1.0,
         temperature=0.0,
-        vad_filter=True,
+        vad_filter=vad_filter,
         vad_parameters={"min_silence_duration_ms": 400},
         condition_on_previous_text=False,
-        initial_prompt=WHISPER_MEDICAL_PROMPT_FA,
+        initial_prompt=initial_prompt or WHISPER_MEDICAL_PROMPT_FA,
         without_timestamps=True,
     )
     if language:
@@ -192,7 +226,49 @@ def transcribe_medical_speech(model: Any, audio_path: str) -> str:
                 pass
 
 
-def _openai_transcribe_file(audio_path: str, timeout: int = 120) -> str:
+def transcribe_form_demographics_speech(model: Any, audio_path: str) -> str:
+    """STT biased for patient form fields (gender / age / height). Experiment only."""
+    wav_path, cleanup = normalize_audio_for_stt(audio_path)
+    try:
+        # Soft VAD: short form utterances are often clipped by aggressive VAD.
+        text = _whisper_transcribe(
+            model,
+            wav_path,
+            language="fa",
+            initial_prompt=WHISPER_FORM_PROMPT_FA,
+            vad_filter=False,
+        )
+        if _is_garbled_transcription(text) or not text.strip():
+            text = _whisper_transcribe(
+                model,
+                wav_path,
+                language="fa",
+                initial_prompt=WHISPER_FORM_PROMPT_FA,
+                vad_filter=True,
+            )
+        if _is_garbled_transcription(text):
+            text = _whisper_transcribe(
+                model,
+                wav_path,
+                language=None,
+                initial_prompt=WHISPER_FORM_PROMPT_FA,
+                vad_filter=False,
+            )
+        return normalize_transcript_fa(text, extra_fixes=_FORM_TRANSCRIPT_FIXES)
+    finally:
+        if cleanup and os.path.exists(wav_path):
+            try:
+                os.remove(wav_path)
+            except OSError:
+                pass
+
+
+def _openai_transcribe_file(
+    audio_path: str,
+    timeout: int = 120,
+    prompt: str | None = None,
+    extra_fixes: tuple[tuple[str, str], ...] = (),
+) -> str:
     """OpenAI-compatible ``/audio/transcriptions`` → Persian text."""
     cfg = openai_compatible_config()
     if not cfg.configured:
@@ -207,7 +283,7 @@ def _openai_transcribe_file(audio_path: str, timeout: int = 120) -> str:
             data={
                 "model": model,
                 "language": "fa",
-                "prompt": WHISPER_MEDICAL_PROMPT_FA[:800],
+                "prompt": (prompt or WHISPER_MEDICAL_PROMPT_FA)[:800],
             },
             timeout=timeout,
         )
@@ -224,7 +300,7 @@ def _openai_transcribe_file(audio_path: str, timeout: int = 120) -> str:
         text = response.text.strip()
     if not text:
         raise RuntimeError("OpenAI STT returned empty transcript")
-    return normalize_transcript_fa(text)
+    return normalize_transcript_fa(text, extra_fixes=extra_fixes)
 
 
 def transcribe_medical_audio(
@@ -270,3 +346,30 @@ def transcribe_medical_audio(
 
     model = local_model_getter()
     return transcribe_medical_speech(model, audio_path)
+def transcribe_form_demographics_audio(
+    audio_path: str,
+    local_model_getter: Callable[[], Any],
+) -> str:
+    """Experiment STT for patient-form fill (HakimAI medical STT unchanged)."""
+    provider = stt_provider()
+    if provider == "openai":
+        cfg = openai_compatible_config()
+        if cfg.configured:
+            try:
+                wav_path, cleanup = normalize_audio_for_stt(audio_path)
+                try:
+                    return _openai_transcribe_file(
+                        wav_path,
+                        prompt=WHISPER_FORM_PROMPT_FA,
+                        extra_fixes=_FORM_TRANSCRIPT_FIXES,
+                    )
+                finally:
+                    if cleanup and os.path.exists(wav_path):
+                        try:
+                            os.remove(wav_path)
+                        except OSError:
+                            pass
+            except Exception as e:
+                print(f"Form STT cloud failed ({e}); falling back to local Whisper")
+    model = local_model_getter()
+    return transcribe_form_demographics_speech(model, audio_path)

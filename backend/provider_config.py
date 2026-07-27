@@ -28,7 +28,7 @@ def openai_compatible_config() -> OpenAICompatibleConfig:
         or os.getenv("OPENAI_TTS_API_KEY")
         or os.getenv("GAPGPT_API_KEY")
         or ""
-    ).strip()
+    ).strip().strip('"').strip("'")
     base = (
         os.getenv("OPENAI_BASE_URL")
         or os.getenv("GAPGPT_BASE_URL")
@@ -76,10 +76,25 @@ def openai_speech_llm_model() -> str:
     return (os.getenv("OPENAI_SPEECH_LLM_MODEL") or os.getenv("OPENAI_CHAT_MODEL") or "gpt-4o-mini").strip()
 
 
+def llm_provider() -> str:
+    """Answer LLM for RAG: ``ollama`` (default) | ``openai`` (GapGPT / OpenAI-compatible)."""
+    return (os.getenv("LLM_PROVIDER") or "ollama").strip().lower()
+
+
+def openai_chat_model() -> str:
+    return (
+        os.getenv("OPENAI_CHAT_MODEL")
+        or os.getenv("LLM_CHAT_MODEL")
+        or "gpt-4o-mini"
+    ).strip()
+
+
 def provider_status_summary() -> dict[str, object]:
     """Safe status dict for smoke scripts / debugging (no secrets)."""
     cfg = openai_compatible_config()
     return {
+        "llm_provider": llm_provider(),
+        "openai_chat_model": openai_chat_model(),
         "tts_provider": tts_provider(),
         "stt_provider": stt_provider(),
         "tts_digit_mode": tts_digit_mode(),
@@ -91,6 +106,7 @@ def provider_status_summary() -> dict[str, object]:
         "openai_stt_model": openai_stt_model(),
         "openai_speech_llm_model": openai_speech_llm_model(),
         "fallback": {
+            "llm": "ollama biomistral",
             "tts": "edge-tts",
             "stt": "local faster-whisper",
             "speech_normalize": "dictionary prepare_text_for_tts",
