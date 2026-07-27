@@ -10,6 +10,8 @@ X-API-Key: <from voice-server .env API_KEY>
 
 API responses do **not** include `s3_bucket` / `s3_key`. HakimAI already has S3 credentials.
 
+Browser `audio_url` fields (if used by other clients) may include short-lived `exp`+`sig` query params when the voice server has `API_KEY` set. HakimAI should keep polling S3 — not `/voice/audio`.
+
 ---
 
 ## Mode A — Text → Voice (TTS)

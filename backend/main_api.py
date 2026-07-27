@@ -31,6 +31,11 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from pydantic import BaseModel, Field
 
 from backend.api_auth import configured_api_key, enforce_api_key
+from backend.audio_security import (
+    audio_signing_enabled,
+    is_allowed_audio_proxy_key,
+    verify_audio_signature,
+)
 from backend.case_store import (
     load_meta,
     new_meta,
@@ -55,7 +60,28 @@ from backend.medical_voice_utils import (
 )
 from backend.stt_utils import detect_audio_extension, transcribe_medical_audio
 
-app = FastAPI(title="Medical RAG API")
+
+def _api_docs_enabled() -> bool:
+    """Hide OpenAPI UI in production when API_KEY is set (opt-in with EXPOSE_API_DOCS=1)."""
+    if os.getenv("DISABLE_API_DOCS", "").strip().lower() in ("1", "true", "yes", "on"):
+        return False
+    if configured_api_key() and os.getenv("EXPOSE_API_DOCS", "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return False
+    return True
+
+
+_docs_on = _api_docs_enabled()
+app = FastAPI(
+    title="Medical RAG API",
+    docs_url="/docs" if _docs_on else None,
+    redoc_url="/redoc" if _docs_on else None,
+    openapi_url="/openapi.json" if _docs_on else None,
+)
 app.middleware("http")(enforce_api_key)
 
 PERSIST_DIRECTORY = "db"  
@@ -1193,15 +1219,32 @@ async def get_msg(uuid: str):
 
 @app.get(
     "/voice/audio/{key:path}",
-    responses={200: {"content": {"audio/mpeg": {}}}, 404: {"description": "Not found"}},
+    responses={
+        200: {"content": {"audio/mpeg": {}}},
+        403: {"description": "Invalid or expired signed link"},
+        404: {"description": "Not found"},
+    },
     summary="Stream a stored MP3 audio file (private proxy)",
 )
-async def stream_audio(key: str):
-    """Proxy endpoint: fetches the private MP3 from object storage and streams it."""
+async def stream_audio(key: str, request: Request):
+    """Proxy endpoint: fetches the private MP3 from object storage and streams it.
+
+    Keys are allowlisted (no ``cases/``, no ``..``). When API_KEY is set, URLs
+    from ``build_audio_proxy_url`` include ``exp``+``sig`` and are verified here.
+    HakimAI downloads TTS from S3 directly and does not use this endpoint.
+    """
+    if not is_allowed_audio_proxy_key(key):
+        raise HTTPException(status_code=404, detail="Audio file not found.")
+    if audio_signing_enabled() and not verify_audio_signature(
+        key,
+        request.query_params.get("exp"),
+        request.query_params.get("sig"),
+    ):
+        raise HTTPException(status_code=403, detail="Invalid or expired audio link.")
     filename = key.rsplit("/", 1)[-1]
     try:
         audio_bytes = download_mp3_from_storage(key)
-    except RuntimeError:
+    except (RuntimeError, ValueError):
         raise HTTPException(status_code=404, detail="Audio file not found.")
     return Response(
         content=audio_bytes,

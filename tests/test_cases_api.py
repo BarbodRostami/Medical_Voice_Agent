@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import tempfile
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from backend.case_store import new_meta, output_audio_key, tehran_date_str, validate_case_id
-from backend.medical_voice_utils import build_audio_proxy_url, resolve_storage_key
+from backend.storage_keys import build_audio_proxy_url, resolve_storage_key
 
 
 class CaseStoreTests(unittest.TestCase):
@@ -48,14 +49,23 @@ class CaseStoreTests(unittest.TestCase):
         self.assertEqual(resolve_storage_key("x.mp3"), "audio/x.mp3")
 
     def test_dated_audio_proxy_url(self) -> None:
-        url = build_audio_proxy_url(
-            "http://192.168.1.235:8000",
-            "2026-07-19/case-1.mp3",
-        )
-        self.assertEqual(
-            url,
-            "http://192.168.1.235:8000/voice/audio/2026-07-19/case-1.mp3",
-        )
+        with patch.dict(
+            os.environ,
+            {
+                "API_KEY": "",
+                "AUDIO_SIGNING_SECRET": "",
+                "AUDIO_PROXY_REQUIRE_SIGNATURE": "0",
+            },
+            clear=False,
+        ):
+            url = build_audio_proxy_url(
+                "http://192.168.1.235:8000",
+                "2026-07-19/case-1.mp3",
+            )
+            self.assertEqual(
+                url,
+                "http://192.168.1.235:8000/voice/audio/2026-07-19/case-1.mp3",
+            )
 
 
 class SttOnlyCaseWorkerTests(unittest.TestCase):

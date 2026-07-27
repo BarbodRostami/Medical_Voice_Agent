@@ -45,7 +45,6 @@ docs/                    # SETUP, COLLABORATOR_API, VOICE_DEMO_CHECKLIST
 assets/
   audio/demo/            # presentation A/B pack
   audio/scratch/         # one-off smoke tests (gitignored mp3)
-  models/                # optional legacy Piper ONNX
   data/                  # source PDFs
 postman/                 # Postman collection + environment
 admin_panel/, api/, config/   # Django admin (chat history)
