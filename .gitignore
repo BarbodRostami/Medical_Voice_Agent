@@ -31,6 +31,12 @@ assets/data/*.pdf
 .cursor/
 .vscode/
 *.code-workspace
+.streamlit/
+
+# Local scratch / debug dumps
+tmp_*.txt
+tmp_*.log
+tmp_*.json
 
 # OS files
 # OS / secrets
