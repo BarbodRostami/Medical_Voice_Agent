@@ -23,6 +23,8 @@ archive/
 
 # Generated / scratch audio (keep folder via .gitkeep)
 assets/data/*.pdf
+assets/audio/scratch/*
+!assets/audio/scratch/.gitkeep
 
 # Local / IDE (do not publish)
 .env
@@ -37,10 +39,20 @@ assets/data/*.pdf
 tmp_*.txt
 tmp_*.log
 tmp_*.json
+*.log
+
+# Test / type / coverage caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
 
 # OS files
 # OS / secrets
 .DS_Store
+Thumbs.db
 
 # Local Piper / ONNX models (optional, large)
 assets/models/
