@@ -50,7 +50,8 @@ _MALE = re.compile(
     re.IGNORECASE,
 )
 _FEMALE = re.compile(
-    r"(?:زن|خانم|خانوم|بانو|دختر|female|woman|mrs?\.?|miss)",
+    # Avoid matching «زن» inside «وزن»
+    r"(?:(?<!و)زن|خانم|خانوم|بانو|دختر|female|woman|mrs?\.?|miss)",
     re.IGNORECASE,
 )
 
@@ -284,9 +285,19 @@ def _extract_ventilator_days(text: str) -> float | None:
 
 def _extract_tube_type(text: str) -> str | None:
     t = text.lower()
-    if re.search(r"تراک(?:ئوستومی)?|trach|tracheostom", t, re.I):
+    if re.search(
+        r"تراک(?:ئوستومی)?|\btrach\b|tracheostom|لوله\s*تراک",
+        t,
+        re.I,
+    ):
         return "Trach"
-    if re.search(r"\bett\b|لوله\s*(?:دهان|تراشه)|اندوتراک|endotrach", t, re.I):
+    # Spoken Persian spellings of ETT + Latin forms
+    if re.search(
+        r"\bett\b|ای\s*تی\s*تی|آی\s*تی\s*تی|e\s*t\s*t|"
+        r"لوله\s*(?:دهان|تراشه)|اندوتراک|endotrach",
+        t,
+        re.I,
+    ):
         return "ETT"
     return None
 
@@ -329,13 +340,13 @@ def _extract_bool_flag(text: str, patterns: tuple[str, ...]) -> bool | None:
 
 
 def _extract_rass(text: str) -> int | None:
-    m = re.search(r"(?:rass|راس)\s*[:\-]?\s*([+\-]\d{1,2})", text, re.I)
+    m = re.search(r"(?:rass|راس|رَس)\s*[:\-]?\s*([+\-]\d{1,2})", text, re.I)
     if m:
         val = int(m.group(1))
         if -5 <= val <= 4:
             return val
     m = re.search(
-        r"(?:rass|راس)\s*[:\-]?\s*منفی\s*(یک|دو|سه|چهار|پنج|\d)",
+        r"(?:rass|راس|رَس)\s*[:\-]?\s*منفی\s*(یک|دو|سه|چهار|پنج|\d)",
         text,
         re.I,
     )
@@ -344,7 +355,16 @@ def _extract_rass(text: str) -> int | None:
         val = persian_spoken_number(raw) if not raw.isdigit() else int(raw)
         if val is not None and 1 <= val <= 5:
             return -val
-    m = re.search(r"(?:rass|راس)\s*[:\-]?\s*(\d{1,2})", text, re.I)
+    m = re.search(
+        r"(?:rass|راس|رَس)\s*[:\-]?\s*منفی\s*([۰-۹0-9])",
+        text,
+        re.I,
+    )
+    if m:
+        val = int(m.group(1).translate(_PERSIAN_DIGITS))
+        if 1 <= val <= 5:
+            return -val
+    m = re.search(r"(?:rass|راس|رَس)\s*[:\-]?\s*(\d{1,2})", text, re.I)
     if m:
         val = int(m.group(1))
         if -5 <= val <= 4:
@@ -511,6 +531,99 @@ def extract_patient_demographics(transcript: str) -> dict[str, Any]:
         "missing": missing,
         "extract_version": EXTRACT_VERSION,
     }
+
+
+def finalize_patient_fields(fields: dict[str, Any], *, raw_text: str = "") -> dict[str, Any]:
+    """Recompute IBW / found / missing after merge or manual edit."""
+    gender = fields.get("gender")
+    height_cm = fields.get("height_cm")
+    height_int: int | None
+    if isinstance(height_cm, (int, float)):
+        height_int = int(height_cm)
+    else:
+        height_int = None
+    ibw = compute_ibw_kg(
+        gender if gender in ("male", "female") else None,
+        height_int,
+    )
+    out: dict[str, Any] = {k: fields.get(k) for k in FIELD_LABELS_FA}
+    out["ibw_kg"] = ibw
+    found = [k for k, v in out.items() if v is not None]
+    if "ibw_kg" in found and (out.get("gender") is None or out.get("height_cm") is None):
+        found = [k for k in found if k != "ibw_kg"]
+        out["ibw_kg"] = None
+    missing = [k for k in FIELD_LABELS_FA if out.get(k) is None]
+    return {
+        **out,
+        "raw_text": raw_text if raw_text else (fields.get("raw_text") or ""),
+        "found": found,
+        "missing": missing,
+        "extract_version": fields.get("extract_version") or EXTRACT_VERSION,
+    }
+
+
+def merge_patient_extractions(
+    base: dict[str, Any] | None,
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge a new extract into an existing result (new non-null values win)."""
+    if not base:
+        return incoming
+    merged: dict[str, Any] = {k: base.get(k) for k in FIELD_LABELS_FA}
+    for key in FIELD_LABELS_FA:
+        if key == "ibw_kg":
+            continue
+        new_val = incoming.get(key)
+        if new_val is not None:
+            merged[key] = new_val
+    raw_parts = [
+        p.strip()
+        for p in (base.get("raw_text") or "", incoming.get("raw_text") or "")
+        if p and str(p).strip()
+    ]
+    raw = " | ".join(raw_parts)
+    return finalize_patient_fields(merged, raw_text=raw)
+
+
+def export_fields_payload(result: dict[str, Any]) -> dict[str, Any]:
+    """JSON-friendly payload for clipboard / HakimAI handoff experiments."""
+    return {
+        "fields": {k: result.get(k) for k in FIELD_LABELS_FA},
+        "found": list(result.get("found") or []),
+        "missing": list(result.get("missing") or []),
+        "raw_text": result.get("raw_text") or "",
+        "extract_version": result.get("extract_version") or EXTRACT_VERSION,
+    }
+
+
+def confirmation_speech_fa(result: dict[str, Any], *, max_items: int = 6) -> str:
+    """Short Persian TTS confirmation of extracted fields."""
+    parts: list[str] = []
+    priority = (
+        "gender",
+        "age",
+        "height_cm",
+        "weight_kg",
+        "ventilator_days",
+        "tube_type",
+        "indication",
+        "rass",
+        "diagnosis_category",
+        "fever",
+        "sedation_active",
+        "recent_surgery",
+    )
+    for key in priority:
+        val = result.get(key)
+        if val is None:
+            continue
+        label = FIELD_LABELS_FA.get(key, key)
+        parts.append(f"{label} {format_field_value(key, val)}")
+        if len(parts) >= max_items:
+            break
+    if not parts:
+        return "چیزی برای تأیید پیدا نشد."
+    return "، ".join(parts) + ". درسته؟"
 
 
 def gender_label_fa(gender: Gender | None) -> str:

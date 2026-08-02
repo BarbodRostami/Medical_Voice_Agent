@@ -69,7 +69,7 @@ class CaseStoreTests(unittest.TestCase):
 
 
 class SttOnlyCaseWorkerTests(unittest.TestCase):
-    """Collaborator audio path must return transcript as text without calling LLM."""
+    """Collaborator audio path returns transcript + optional fields JSON (no LLM)."""
 
     def test_worker_sets_ready_with_transcript_as_text(self) -> None:
         import backend.main_api as api
@@ -91,8 +91,8 @@ class SttOnlyCaseWorkerTests(unittest.TestCase):
             patch.object(api, "_get_whisper", return_value=MagicMock()),
             patch.object(
                 api,
-                "transcribe_medical_speech",
-                return_value="سلام یک دو سه",
+                "transcribe_medical_audio",
+                return_value="بیمار آقای ۴۵ ساله قد ۱۷۵ سانتی‌متر",
             ),
             patch.object(api, "save_output_text"),
             patch.object(api, "_safe_log"),
@@ -101,11 +101,22 @@ class SttOnlyCaseWorkerTests(unittest.TestCase):
 
         meta = patches[case_id]
         self.assertEqual(meta["status"], "ready")
-        self.assertEqual(meta["text"], "سلام یک دو سه")
-        self.assertEqual(meta["transcript"], "سلام یک دو سه")
-        self.assertEqual(meta["answer"], "سلام یک دو سه")
+        self.assertEqual(meta["text"], "بیمار آقای ۴۵ ساله قد ۱۷۵ سانتی‌متر")
+        self.assertEqual(meta["transcript"], meta["text"])
+        self.assertEqual(meta["answer"], meta["text"])
         self.assertIsNone(meta.get("error"))
+        self.assertIsInstance(meta.get("fields"), dict)
+        self.assertEqual(meta["fields"]["gender"], "male")
+        self.assertEqual(meta["fields"]["age"], 45)
+        self.assertEqual(meta["fields"]["height_cm"], 175)
+        self.assertIn("gender", meta["fields"]["found"])
         self.assertFalse(Path(path).exists())
+
+        # Public view keeps legacy keys and exposes fields
+        view = api._case_public_view(meta)
+        self.assertEqual(view["text"], meta["text"])
+        self.assertIn("fields", view)
+        self.assertEqual(view["fields"]["age"], 45)
 
 
 if __name__ == "__main__":

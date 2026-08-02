@@ -57,9 +57,13 @@ TTS engine is internal to the voice server. Default is local `edge-tts`. Optiona
 
 ---
 
-## Mode B — Voice → Text (STT only)
+## Mode B — Voice → Text (STT) + structured fields
 
-HakimAI owns medical reasoning. The voice server **only transcribes** speech to Persian text (no RAG / no LLM on this path).
+HakimAI owns medical reasoning. The voice server transcribes speech to Persian text
+and **also** returns a structured ``fields`` JSON for patient-tab form fill.
+
+Legacy clients are unchanged: keep reading ``text`` / ``transcript`` / ``answer``.
+New clients may additionally read ``fields``.
 
 STT uses Whisper (`WHISPER_MODEL_SIZE`, default `medium`) with a Persian medical + digits prompt and stronger beam search. Prefer clean WAV / 16 kHz mono from the client when possible.
 
@@ -76,7 +80,47 @@ Then poll:
 GET /api/get-msg?uuid=ext-1002
 ```
 
-When `status=ready`, use `text` (same as `transcript` / `answer`). Ignore `null` while `queued`/`processing`.
+When `status=ready`:
+
+```json
+{
+  "uuid": "ext-1002",
+  "status": "ready",
+  "mode": "audio",
+  "text": "بیمار آقای چهل و پنج ساله قد صد و هفتاد و پنج ...",
+  "transcript": "...همان متن...",
+  "answer": "...همان متن...",
+  "fields": {
+    "gender": "male",
+    "age": 45,
+    "height_cm": 175,
+    "weight_kg": null,
+    "ibw_kg": 70.1,
+    "ventilator_days": null,
+    "tube_type": null,
+    "indication": null,
+    "rass": null,
+    "covid_status": null,
+    "main_diagnosis": null,
+    "diagnosis_category": null,
+    "sedation_active": null,
+    "recent_surgery": null,
+    "fever": null,
+    "secretion_intensity": null,
+    "cxr_summary": null,
+    "consultation_goal": null,
+    "found": ["gender", "age", "height_cm", "ibw_kg"],
+    "missing": ["weight_kg", "ventilator_days"],
+    "raw_text": "...",
+    "extract_version": "patient-tab-v1",
+    "schema_keys": ["gender", "age", "height_cm", "..."]
+  }
+}
+```
+
+- **`text` / `transcript` / `answer`**: full free-text transcript (backward compatible)
+- **`fields`**: structured extract for form widgets (`null` = not heard). Use `fields.age`, `fields.gender`, …
+- Ignore `null` while `queued` / `processing`
 
 ---
 
@@ -85,4 +129,4 @@ When `status=ready`, use `text` (same as `transcript` / `answer`). Ignore `null`
 1. Voice API base URL + `API_KEY`
 2. S3 endpoint / bucket / keys (for TTS download only)
 3. Poll formula: `{tehran_date}/{uuid}.mp3`
-4. For voice: poll `GET /api/get-msg` until `status=ready`, then read `text`
+4. For voice: poll `GET /api/get-msg` until `status=ready`, then read `text` (and optionally `fields`)

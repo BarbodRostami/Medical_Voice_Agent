@@ -5,10 +5,16 @@ Does **not** change HakimAI, `/api/ask`, or production RAG paths.
 
 ## What it does
 
-1. Record / upload Persian speech **or** paste text  
-2. STT via existing `POST /api/cases` (transcript only)  
-3. Extract **جنس / سن / قد** with rules in `form_extract.py`  
-4. Fill a small patient form in Streamlit
+1. Greeting TTS → record / upload Persian speech  
+2. STT via `POST /experiments/voice-form/stt`  
+3. Extract patient-tab fields (`form_extract.py`)  
+4. Result card with:
+   - filled fields only
+   - **missing-field hints**
+   - **manual edit**
+   - **append another voice** (merge into existing result)
+   - **confirmation TTS**
+   - **copy JSON** (for future HakimAI handoff tests)
 
 ## Run (Windows)
 
@@ -20,14 +26,12 @@ cd D:\Python_envs\rag_project
 
 Open **http://localhost:8502**
 
-Minimal UX: greeting TTS → mic only → show gender/age/height after extract.
-
-## Files (this folder only)
+## Files
 
 | File | Role |
 |------|------|
-| `form_extract.py` | Parse gender / age / height from text |
-| `voice_form_ui.py` | Streamlit form demo |
+| `form_extract.py` | Parse + merge + confirmation speech helpers |
+| `voice_form_ui.py` | Streamlit experiment UI |
 | `README.md` | This note |
 
 Unit tests: `tests/test_form_extract.py`

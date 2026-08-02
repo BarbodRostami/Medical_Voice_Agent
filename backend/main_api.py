@@ -64,6 +64,24 @@ from backend.medical_voice_utils import (
     upload_mp3_with_timeout,
 )
 from backend.stt_utils import detect_audio_extension, transcribe_medical_audio, transcribe_form_demographics_audio
+from backend.experiments.form_extract import (
+    FIELD_LABELS_FA,
+    extract_patient_demographics,
+    export_fields_payload,
+)
+
+
+def _collaborator_fields_from_transcript(transcript: str) -> dict:
+    """Flat form JSON for HakimAI + found/missing (keeps free-text separate)."""
+    payload = export_fields_payload(extract_patient_demographics(transcript))
+    flat = dict(payload.get("fields") or {})
+    flat["found"] = list(payload.get("found") or [])
+    flat["missing"] = list(payload.get("missing") or [])
+    flat["raw_text"] = payload.get("raw_text") or transcript
+    flat["extract_version"] = payload.get("extract_version") or "patient-tab-v1"
+    # Help clients iterate known form keys without hard-coding
+    flat["schema_keys"] = list(FIELD_LABELS_FA.keys())
+    return flat
 
 
 def _api_docs_enabled() -> bool:
@@ -805,9 +823,11 @@ def _safe_log(msg: str) -> None:
 
 
 def _worker_case_audio(case_id: str, audio_path: str, base_url: str) -> None:
-    """HakimAI voice case: STT only → text for GET /api/get-msg (no RAG/LLM/TTS).
+    """HakimAI voice case: STT → Persian text + optional structured form fields.
 
-    HakimAI owns medical reasoning; this server only turns speech into Persian text.
+    Keeps legacy ``text`` / ``transcript`` / ``answer`` for backward compatibility.
+    Adds ``fields`` JSON (patient-tab extract) so HakimAI can fill form widgets.
+    No RAG/LLM medical reasoning on this path.
     """
     del base_url  # reserved for future audio_url links; unused in STT-only mode
     try:
@@ -824,18 +844,31 @@ def _worker_case_audio(case_id: str, audio_path: str, base_url: str) -> None:
             )
             return
 
+        # Structured extract for form fill — does not replace free-text fields.
         try:
-            save_output_text(case_id, transcript=transcript, answer=transcript)
+            fields_payload = _collaborator_fields_from_transcript(transcript)
+        except Exception as e:
+            _safe_log(f"[case {case_id}] Warning: form extract failed: {e}")
+            fields_payload = None
+
+        try:
+            save_output_text(
+                case_id,
+                transcript=transcript,
+                answer=transcript,
+                fields=fields_payload,
+            )
         except Exception as e:
             _safe_log(f"[case {case_id}] Warning: could not store output text: {e}")
 
         _patch_case(
             case_id,
             status="ready",
-            message="تکمیل شد — متن آماده است (GET /api/get-msg).",
+            message="تکمیل شد — متن و فیلدها آماده است (GET /api/get-msg).",
             transcript=transcript,
             answer=transcript,
             text=transcript,
+            fields=fields_payload,
             audio_url=None,
             error=None,
         )
@@ -847,6 +880,7 @@ def _worker_case_audio(case_id: str, audio_path: str, base_url: str) -> None:
             "text": transcript,
             "transcript": transcript,
             "answer": transcript,
+            "fields": fields_payload,
         }
         _safe_log(f"[case {case_id}] READY for get-msg: {json.dumps(payload, ensure_ascii=False)}")
     except Exception as e:
@@ -909,7 +943,7 @@ def _enqueue_case_audio(
         "mode": "audio",
         "message": (
             "فایل صوتی دریافت شد — پس از ready متن همان ویس در "
-            "GET /api/get-msg?uuid=... (فیلد text / transcript / answer)."
+            "GET /api/get-msg?uuid=... (فیلد text / transcript / answer و اختیاری fields)."
         ),
     }
 
@@ -922,7 +956,11 @@ def _save_input_audio_safe(case_id: str, raw: bytes, suffix: str) -> None:
 
 
 def _case_public_view(meta: dict) -> dict:
-    """Public JSON for HakimAI — no s3_bucket / s3_key fields."""
+    """Public JSON for HakimAI — no s3_bucket / s3_key fields.
+
+    Legacy clients keep using ``text`` / ``transcript`` / ``answer``.
+    Newer clients may also read ``fields`` (structured patient-tab JSON).
+    """
     text = meta.get("text") or meta.get("answer") or meta.get("transcript")
     return {
         "uuid": meta.get("uuid"),
@@ -932,6 +970,7 @@ def _case_public_view(meta: dict) -> dict:
         "text": text,
         "transcript": meta.get("transcript"),
         "answer": meta.get("answer"),
+        "fields": meta.get("fields"),
         "audio_url": meta.get("audio_url"),
         "error": meta.get("error"),
         "created_at": meta.get("created_at"),

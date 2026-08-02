@@ -102,6 +102,7 @@ def new_meta(
         "transcript": None,
         "answer": None,
         "text": None,
+        "fields": None,
         "error": None,
         "created_at": utc_now_iso(),
         "updated_at": utc_now_iso(),
@@ -131,14 +132,20 @@ def save_input_audio(case_id: str, audio_bytes: bytes, extension: str) -> str:
     return key
 
 
-def save_output_text(case_id: str, *, transcript: str | None, answer: str | None) -> None:
+def save_output_text(
+    case_id: str,
+    *,
+    transcript: str | None,
+    answer: str | None,
+    fields: dict[str, Any] | None = None,
+) -> None:
     """Persist STT/RAG text backup under cases/ (internal)."""
-    put_json_to_storage(
-        f"cases/{case_id}/output/text.json",
-        {
-            "uuid": case_id,
-            "transcript": transcript,
-            "answer": answer,
-            "text": answer or transcript,
-        },
-    )
+    payload: dict[str, Any] = {
+        "uuid": case_id,
+        "transcript": transcript,
+        "answer": answer,
+        "text": answer or transcript,
+    }
+    if fields is not None:
+        payload["fields"] = fields
+    put_json_to_storage(f"cases/{case_id}/output/text.json", payload)
