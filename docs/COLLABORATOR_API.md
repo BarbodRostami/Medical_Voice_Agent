@@ -57,15 +57,18 @@ TTS engine is internal to the voice server. Default is local `edge-tts`. Optiona
 
 ---
 
-## Mode B — Voice → Text (STT) + structured fields
+## Mode B — Voice → JSON on S3 (STT + structured fields)
 
-HakimAI owns medical reasoning. The voice server transcribes speech to Persian text
-and **also** returns a structured ``fields`` JSON for patient-tab form fill.
+Same S3 collaboration pattern as Mode A (TTS MP3), but the pollable object is JSON.
 
-Legacy clients are unchanged: keep reading ``text`` / ``transcript`` / ``answer``.
-New clients may additionally read ``fields``.
+HakimAI owns medical reasoning / form UI. The voice server:
 
-STT uses Whisper (`WHISPER_MODEL_SIZE`, default `medium`) with a Persian medical + digits prompt and stronger beam search. Prefer clean WAV / 16 kHz mono from the client when possible.
+1. Accepts audio via ``POST /api/cases``
+2. Runs Whisper STT
+3. Extracts patient-tab fields
+4. Uploads result to S3 for HakimAI to poll
+
+### 1) Start job
 
 ```bash
 curl -X POST "http://192.168.1.235:8000/api/cases" \
@@ -74,13 +77,26 @@ curl -X POST "http://192.168.1.235:8000/api/cases" \
   -F "file=@question.wav"
 ```
 
-Then poll:
+Immediate response:
 
-```http
-GET /api/get-msg?uuid=ext-1002
+```json
+{"uuid": "ext-1002", "status": "queued", "mode": "audio"}
 ```
 
-When `status=ready`:
+### 2) HakimAI polls S3
+
+Voice server uploads JSON to:
+
+```text
+{YYYY-MM-DD}/{uuid}.json
+```
+
+- Date = **Asia/Tehran** calendar day when the job was accepted  
+- Example: `2026-08-02/ext-1002.json`
+
+Poll with `HeadObject` / `GetObject` until the object exists, then download.
+
+JSON body example:
 
 ```json
 {
@@ -118,15 +134,25 @@ When `status=ready`:
 }
 ```
 
-- **`text` / `transcript` / `answer`**: full free-text transcript (backward compatible)
-- **`fields`**: structured extract for form widgets (`null` = not heard). Use `fields.age`, `fields.gender`, …
-- Ignore `null` while `queued` / `processing`
+- **`text` / `transcript` / `answer`**: full free-text transcript (legacy-compatible)
+- **`fields`**: structured extract for form widgets (`null` = not heard)
+
+### Optional status check
+
+```http
+GET /api/get-msg?uuid=ext-1002
+```
+
+Same payload shape when `status=ready` (plus message timestamps). Not required if you only poll S3.
+
+STT uses Whisper (`WHISPER_MODEL_SIZE`, default `medium`) with a Persian medical + digits prompt.
 
 ---
 
 ## What to share with HakimAI
 
 1. Voice API base URL + `API_KEY`
-2. S3 endpoint / bucket / keys (for TTS download only)
-3. Poll formula: `{tehran_date}/{uuid}.mp3`
-4. For voice: poll `GET /api/get-msg` until `status=ready`, then read `text` (and optionally `fields`)
+2. S3 endpoint / bucket / keys
+3. TTS poll: `{tehran_date}/{uuid}.mp3`
+4. STT poll: `{tehran_date}/{uuid}.json` (contains `text` + `fields`)
+5. Optional: `GET /api/get-msg?uuid=...` for status

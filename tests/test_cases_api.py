@@ -7,7 +7,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from backend.case_store import new_meta, output_audio_key, tehran_date_str, validate_case_id
+from backend.case_store import (
+    new_meta,
+    output_audio_key,
+    output_json_key,
+    tehran_date_str,
+    validate_case_id,
+)
 from backend.storage_keys import build_audio_proxy_url, resolve_storage_key
 
 
@@ -29,6 +35,10 @@ class CaseStoreTests(unittest.TestCase):
         self.assertEqual(key, "2026-07-19/case-1.mp3")
         self.assertFalse(key.startswith("audio/"))
 
+    def test_output_json_key_dated(self) -> None:
+        key = output_json_key("case-1", day="2026-07-19")
+        self.assertEqual(key, "2026-07-19/case-1.json")
+
     def test_tehran_date_format(self) -> None:
         self.assertRegex(tehran_date_str(), r"^\d{4}-\d{2}-\d{2}$")
 
@@ -37,6 +47,7 @@ class CaseStoreTests(unittest.TestCase):
             meta = new_meta("case-1", mode="text")
         self.assertEqual(meta["status"], "queued")
         self.assertEqual(meta["output_key"], "2026-07-19/case-1.mp3")
+        self.assertEqual(meta["output_json_key"], "2026-07-19/case-1.json")
         self.assertEqual(meta["day"], "2026-07-19")
         self.assertNotIn("s3_bucket", meta)
         self.assertNotIn("s3_key", meta)
@@ -95,8 +106,20 @@ class SttOnlyCaseWorkerTests(unittest.TestCase):
                 return_value="بیمار آقای ۴۵ ساله قد ۱۷۵ سانتی‌متر",
             ),
             patch.object(api, "save_output_text"),
+            patch.object(
+                api,
+                "save_collaborator_stt_json",
+                return_value="2026-07-19/stt-only-unit-1.json",
+            ) as save_json,
             patch.object(api, "_safe_log"),
+            patch.object(api, "_cases", {case_id: patches[case_id]}),
+            patch.object(api, "_cases_lock", MagicMock()),
         ):
+            # Make lock a real context manager
+            from threading import Lock
+
+            api._cases_lock = Lock()
+            api._cases = {case_id: patches[case_id]}
             api._worker_case_audio(case_id, path, "http://127.0.0.1:8000")
 
         meta = patches[case_id]
@@ -110,6 +133,11 @@ class SttOnlyCaseWorkerTests(unittest.TestCase):
         self.assertEqual(meta["fields"]["age"], 45)
         self.assertEqual(meta["fields"]["height_cm"], 175)
         self.assertIn("gender", meta["fields"]["found"])
+        self.assertTrue(meta.get("output_json_key", "").endswith(".json"))
+        save_json.assert_called_once()
+        s3_body = save_json.call_args.args[1]
+        self.assertEqual(s3_body["text"], meta["text"])
+        self.assertEqual(s3_body["fields"]["age"], 45)
         self.assertFalse(Path(path).exists())
 
         # Public view keeps legacy keys and exposes fields

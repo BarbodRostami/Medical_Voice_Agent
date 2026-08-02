@@ -6,6 +6,10 @@ TTS output key (HakimAI polls this)::
 
     {YYYY-MM-DD}/{uuid}.mp3
 
+STT / form-fields output key (HakimAI polls this)::
+
+    {YYYY-MM-DD}/{uuid}.json
+
 Date is Asia/Tehran calendar day when the job is created.
 
 Internal metadata (optional, voice-server only)::
@@ -15,7 +19,8 @@ Internal metadata (optional, voice-server only)::
     cases/{uuid}/output/text.json   # STT text backup
 
 TTS: HakimAI polls S3 for ``{date}/{uuid}.mp3`` — do not expose bucket/key in API JSON.
-STT: Whisper transcription only; HakimAI reads ``text`` via GET /api/get-msg (no RAG/LLM, no MP3).
+STT: Whisper + structured fields; HakimAI polls ``{date}/{uuid}.json`` on S3
+(and may still use GET /api/get-msg for status / legacy text).
 """
 from __future__ import annotations
 
@@ -79,6 +84,12 @@ def output_audio_key(case_id: str, day: str | None = None) -> str:
     return f"{date_part}/{case_id}.mp3"
 
 
+def output_json_key(case_id: str, day: str | None = None) -> str:
+    """Canonical STT/fields JSON key HakimAI polls: ``{YYYY-MM-DD}/{uuid}.json``."""
+    date_part = day or tehran_date_str()
+    return f"{date_part}/{case_id}.json"
+
+
 def utc_now_iso() -> str:
     return datetime.now(_TEHRAN).astimezone().replace(microsecond=0).isoformat()
 
@@ -98,6 +109,7 @@ def new_meta(
         "message": message,
         "audio_url": None,
         "output_key": output_audio_key(case_id, day),
+        "output_json_key": output_json_key(case_id, day),
         "day": day,
         "transcript": None,
         "answer": None,
@@ -149,3 +161,15 @@ def save_output_text(
     if fields is not None:
         payload["fields"] = fields
     put_json_to_storage(f"cases/{case_id}/output/text.json", payload)
+
+
+def save_collaborator_stt_json(
+    case_id: str,
+    payload: dict[str, Any],
+    *,
+    day: str | None = None,
+) -> str:
+    """Write pollable STT result for HakimAI: ``{YYYY-MM-DD}/{uuid}.json``."""
+    key = output_json_key(case_id, day)
+    put_json_to_storage(key, payload)
+    return key

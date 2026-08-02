@@ -39,6 +39,8 @@ from backend.case_store import (
     load_meta,
     new_meta,
     output_audio_key,
+    output_json_key,
+    save_collaborator_stt_json,
     save_input_audio,
     save_input_text,
     save_meta,
@@ -823,13 +825,15 @@ def _safe_log(msg: str) -> None:
 
 
 def _worker_case_audio(case_id: str, audio_path: str, base_url: str) -> None:
-    """HakimAI voice case: STT → Persian text + optional structured form fields.
+    """HakimAI voice case: STT → Persian text + fields JSON on S3.
 
-    Keeps legacy ``text`` / ``transcript`` / ``answer`` for backward compatibility.
-    Adds ``fields`` JSON (patient-tab extract) so HakimAI can fill form widgets.
-    No RAG/LLM medical reasoning on this path.
+    Same collaboration pattern as TTS MP3:
+    upload result to ``{YYYY-MM-DD}/{uuid}.json`` for HakimAI to poll on S3.
+
+    Also keeps legacy ``text`` / ``transcript`` / ``answer`` / ``fields`` on
+    GET /api/get-msg for status and older clients. No RAG/LLM on this path.
     """
-    del base_url  # reserved for future audio_url links; unused in STT-only mode
+    del base_url  # reserved for future audio_url links; unused in STT mode
     try:
         _patch_case(case_id, status="processing", message="در حال تبدیل صدا به متن...")
         _safe_log(f"[case {case_id}] STT started")
@@ -851,29 +855,10 @@ def _worker_case_audio(case_id: str, audio_path: str, base_url: str) -> None:
             _safe_log(f"[case {case_id}] Warning: form extract failed: {e}")
             fields_payload = None
 
-        try:
-            save_output_text(
-                case_id,
-                transcript=transcript,
-                answer=transcript,
-                fields=fields_payload,
-            )
-        except Exception as e:
-            _safe_log(f"[case {case_id}] Warning: could not store output text: {e}")
-
-        _patch_case(
-            case_id,
-            status="ready",
-            message="تکمیل شد — متن و فیلدها آماده است (GET /api/get-msg).",
-            transcript=transcript,
-            answer=transcript,
-            text=transcript,
-            fields=fields_payload,
-            audio_url=None,
-            error=None,
-        )
-        # Log the exact payload HakimAI should read.
-        payload = {
+        with _cases_lock:
+            day = (_cases.get(case_id) or {}).get("day")
+        json_key = output_json_key(case_id, day)
+        s3_payload = {
             "uuid": case_id,
             "status": "ready",
             "mode": "audio",
@@ -882,7 +867,58 @@ def _worker_case_audio(case_id: str, audio_path: str, base_url: str) -> None:
             "answer": transcript,
             "fields": fields_payload,
         }
-        _safe_log(f"[case {case_id}] READY for get-msg: {json.dumps(payload, ensure_ascii=False)}")
+
+        try:
+            save_output_text(
+                case_id,
+                transcript=transcript,
+                answer=transcript,
+                fields=fields_payload,
+            )
+        except Exception as e:
+            _safe_log(f"[case {case_id}] Warning: could not store internal output text: {e}")
+
+        _patch_case(
+            case_id,
+            message="در حال آپلود JSON روی S3...",
+            output_json_key=json_key,
+        )
+        try:
+            written = save_collaborator_stt_json(case_id, s3_payload, day=day)
+            _safe_log(f"[case {case_id}] S3 JSON OK: {written}")
+        except Exception as e:
+            _safe_log(f"[case {case_id}] FAILED S3 JSON upload: {e}")
+            _patch_case(
+                case_id,
+                status="failed",
+                message="خطا در آپلود JSON روی S3.",
+                error=str(e),
+                text=transcript,
+                transcript=transcript,
+                answer=transcript,
+                fields=fields_payload,
+            )
+            return
+
+        _patch_case(
+            case_id,
+            status="ready",
+            message=(
+                "تکمیل شد — JSON روی S3 آماده است "
+                f"(کلید {{YYYY-MM-DD}}/{case_id}.json)."
+            ),
+            transcript=transcript,
+            answer=transcript,
+            text=transcript,
+            fields=fields_payload,
+            output_json_key=json_key,
+            audio_url=None,
+            error=None,
+        )
+        _safe_log(
+            f"[case {case_id}] READY for S3 poll: "
+            f"{json.dumps(s3_payload, ensure_ascii=False)}"
+        )
     except Exception as e:
         _safe_log(f"[case {case_id}] FAILED: {e}")
         _patch_case(case_id, status="failed", message="خطا در پردازش.", error=str(e))
@@ -942,8 +978,9 @@ def _enqueue_case_audio(
         "status": "queued",
         "mode": "audio",
         "message": (
-            "فایل صوتی دریافت شد — پس از ready متن همان ویس در "
-            "GET /api/get-msg?uuid=... (فیلد text / transcript / answer و اختیاری fields)."
+            "فایل صوتی دریافت شد — بعد از ready JSON را از S3 با کلید "
+            f"{{YYYY-MM-DD}}/{case_id}.json بگیرید (تاریخ تهران). "
+            "وضعیت اختیاری: GET /api/get-msg?uuid=..."
         ),
     }
 
@@ -1107,9 +1144,10 @@ async def create_case(req: Request):
     - **TTS (text):** JSON ``{\"uuid\",\"text\"}`` → we upload MP3 to
       ``{YYYY-MM-DD}/{uuid}.mp3`` (Tehran date). HakimAI polls that key on S3.
       API responses do not expose s3_bucket / s3_key.
-    - **STT (audio):** multipart ``uuid`` + ``file`` → Whisper STT only;
-      HakimAI reads ``text`` (same as transcript) via ``GET /api/get-msg?uuid=``.
-      No RAG/LLM on this path — HakimAI owns medical reasoning.
+    - **STT (audio):** multipart ``uuid`` + ``file`` → Whisper STT + form fields;
+      we upload JSON to ``{YYYY-MM-DD}/{uuid}.json`` for HakimAI to poll on S3
+      (same pattern as MP3). Optional status via ``GET /api/get-msg?uuid=``.
+      No RAG/LLM — HakimAI owns medical reasoning.
     """
     content_type = (req.headers.get("content-type") or "").lower()
     base_url = _public_base_url(req)
