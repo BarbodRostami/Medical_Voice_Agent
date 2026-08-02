@@ -1,4 +1,4 @@
-"""Live smoke: Behin voice case → get-msg has text + fields JSON."""
+"""Live smoke: new get-text has fields; legacy get-msg stays text-only."""
 from __future__ import annotations
 
 import json
@@ -18,14 +18,12 @@ HEADERS = {"X-API-Key": API_KEY} if API_KEY else {}
 
 
 def main() -> int:
-    # 1) health
     home = requests.get(f"{BASE}/", timeout=10)
     print("home", home.status_code, json.dumps(home.json(), ensure_ascii=True)[:200])
     if home.status_code != 200:
         print("FAIL: backend not up")
         return 1
 
-    # 2) TTS a Persian demographics phrase → MP3 bytes
     from backend.medical_voice_utils import persian_to_voice
 
     phrase = (
@@ -37,7 +35,6 @@ def main() -> int:
     print("tts_bytes", len(mp3))
 
     case_id = f"smoke-fields-{uuid.uuid4().hex[:8]}"
-    # 3) POST /api/cases with audio
     r = requests.post(
         f"{BASE}/api/cases",
         headers=HEADERS,
@@ -49,18 +46,17 @@ def main() -> int:
     if r.status_code >= 400:
         return 1
 
-    # 4) poll get-msg
     ready = None
     for i in range(60):
         g = requests.get(
-            f"{BASE}/api/get-msg",
+            f"{BASE}/api/get-text",
             headers=HEADERS,
             params={"uuid": case_id},
             timeout=30,
         )
         data = g.json()
         status = data.get("status")
-        print(f"poll {i} status={status}")
+        print(f"poll {i} get-text status={status}")
         if status == "ready":
             ready = data
             break
@@ -84,37 +80,32 @@ def main() -> int:
                 "age": fields.get("age"),
                 "height_cm": fields.get("height_cm"),
                 "weight_kg": fields.get("weight_kg"),
-                "ventilator_days": fields.get("ventilator_days"),
-                "tube_type": fields.get("tube_type"),
-                "fever": fields.get("fever"),
                 "found": fields.get("found"),
             },
             ensure_ascii=True,
         ),
     )
-
-    # Legacy keys must remain
-    assert ready.get("text"), "missing text"
-    assert ready.get("transcript") == ready.get("text") or ready.get("transcript")
-    assert ready.get("answer") == ready.get("text") or ready.get("answer")
-    assert isinstance(fields, dict) and fields, "missing fields JSON"
-
-    # Soft checks — STT may paraphrase numbers
-    ok_bits = 0
-    if fields.get("gender") == "male":
-        ok_bits += 1
-    if fields.get("age") in (45, 40, 50) or fields.get("age"):
-        ok_bits += 1
-    if fields.get("height_cm") or "175" in text or "قد" in text:
-        ok_bits += 1
-    if fields.get("tube_type") in ("ETT", "Trach") or "تی" in text:
-        ok_bits += 1
-    print("soft_ok_bits", ok_bits)
-    if ok_bits < 2:
-        print("FAIL: fields too empty / STT weak")
+    if not text:
+        print("FAIL: missing text on get-text")
+        return 1
+    if not isinstance(fields, dict) or not fields.get("age"):
+        print("FAIL: missing fields on get-text")
         return 1
 
-    print("SMOKE_OK", case_id)
+    legacy = requests.get(
+        f"{BASE}/api/get-msg",
+        headers=HEADERS,
+        params={"uuid": case_id},
+        timeout=30,
+    ).json()
+    if "fields" in legacy:
+        print("FAIL: get-msg must stay legacy (no fields)", list(legacy.keys()))
+        return 1
+    if not legacy.get("text"):
+        print("FAIL: get-msg missing text")
+        return 1
+    print("legacy_get_msg_ok keys=", sorted(legacy.keys()))
+    print("SMOKE_GET_TEXT_OK", case_id)
     return 0
 
 

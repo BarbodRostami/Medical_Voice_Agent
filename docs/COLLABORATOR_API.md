@@ -8,6 +8,8 @@ X-API-Key: <from voice-server .env API_KEY>
 
 **Rule:** send **either** text **or** audio — never both.
 
+For audio, HakimAI may either upload the file in the POST, **or** pre-upload to shared S3 and POST **uuid only**.
+
 API responses do **not** include `s3_bucket` / `s3_key`. HakimAI already has S3 credentials.
 
 Browser `audio_url` fields (if used by other clients) may include short-lived `exp`+`sig` query params when the voice server has `API_KEY` set. HakimAI should keep polling S3 — not `/voice/audio`.
@@ -63,12 +65,12 @@ Same S3 collaboration pattern as Mode A (TTS MP3), but the pollable object is JS
 
 HakimAI owns medical reasoning / form UI. The voice server:
 
-1. Accepts audio via ``POST /api/cases``
+1. Accepts audio via ``POST /api/cases`` (multipart file **or** uuid-only after S3 pre-upload)
 2. Runs Whisper STT
 3. Extracts patient-tab fields
 4. Uploads result to S3 for HakimAI to poll
 
-### 1) Start job
+### 1a) Start job — multipart file
 
 ```bash
 curl -X POST "http://192.168.1.235:8000/api/cases" \
@@ -77,7 +79,27 @@ curl -X POST "http://192.168.1.235:8000/api/cases" \
   -F "file=@question.wav"
 ```
 
-Immediate response:
+### 1b) Start job — S3 pre-upload + uuid only (HakimAI preferred)
+
+1. HakimAI uploads audio to the shared bucket at:
+
+```text
+cases/{uuid}/input/audio.webm
+```
+
+(also accepted: `.wav`, `.mp3`, `.m4a`, `.ogg`, …)
+
+2. Then notify the voice server (no file in the body):
+
+```bash
+curl -X POST "http://192.168.1.235:8000/api/cases" \
+  -H "X-API-Key: YOUR_KEY" \
+  -F "uuid=ext-1002"
+```
+
+If the object is missing → `404`.
+
+Immediate response (both 1a and 1b):
 
 ```json
 {"uuid": "ext-1002", "status": "queued", "mode": "audio"}
@@ -137,13 +159,19 @@ JSON body example:
 - **`text` / `transcript` / `answer`**: full free-text transcript (legacy-compatible)
 - **`fields`**: structured extract for form widgets (`null` = not heard)
 
-### Optional status check
+### Status poll (choose the right endpoint)
+
+| Endpoint | Use |
+|----------|-----|
+| `GET /api/get-msg?uuid=...` | **Legacy Behin** — text / transcript / answer / status only (**no `fields`**) |
+| `GET /api/get-text?uuid=...` | **New form-fill** — same text + **`fields`** (+ `output_json_key` when ready) |
 
 ```http
-GET /api/get-msg?uuid=ext-1002
+GET /api/get-text?uuid=ext-1002
+X-API-Key: ...
 ```
 
-Same payload shape when `status=ready` (plus message timestamps). Not required if you only poll S3.
+When `status=ready`, read `fields` for the form. Not required if you only poll S3 JSON.
 
 STT uses Whisper (`WHISPER_MODEL_SIZE`, default `medium`) with a Persian medical + digits prompt.
 
@@ -151,8 +179,17 @@ STT uses Whisper (`WHISPER_MODEL_SIZE`, default `medium`) with a Persian medical
 
 ## What to share with HakimAI
 
-1. Voice API base URL + `API_KEY`
+1. Voice API base URL + `API_KEY` (current laptop LAN example: `http://192.168.1.239:8000`)
 2. S3 endpoint / bucket / keys
 3. TTS poll: `{tehran_date}/{uuid}.mp3`
 4. STT poll: `{tehran_date}/{uuid}.json` (contains `text` + `fields`)
-5. Optional: `GET /api/get-msg?uuid=...` for status
+5. Legacy status: `GET /api/get-msg?uuid=...` (text only)
+6. New form status: `GET /api/get-text?uuid=...` (text + `fields`)
+
+If the laptop IP changes or collaborator cannot reach you while your proxy is ON, on the voice-server PC run:
+
+```powershell
+.\scripts\ensure_lan_collaborator_access.ps1 -RestartApi
+```
+
+That opens firewall TCP 8000 on all profiles, adds LAN to proxy bypass (proxy stays ON for GapGPT), and refreshes `PUBLIC_API_URL`.

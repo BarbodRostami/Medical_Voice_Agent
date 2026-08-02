@@ -13,6 +13,8 @@ from backend.case_store import (
     output_json_key,
     tehran_date_str,
     validate_case_id,
+    find_input_audio_key,
+    download_case_input_audio,
 )
 from backend.storage_keys import build_audio_proxy_url, resolve_storage_key
 
@@ -102,7 +104,7 @@ class SttOnlyCaseWorkerTests(unittest.TestCase):
             patch.object(api, "_get_whisper", return_value=MagicMock()),
             patch.object(
                 api,
-                "transcribe_medical_audio",
+                "transcribe_form_demographics_audio",
                 return_value="بیمار آقای ۴۵ ساله قد ۱۷۵ سانتی‌متر",
             ),
             patch.object(api, "save_output_text"),
@@ -140,11 +142,101 @@ class SttOnlyCaseWorkerTests(unittest.TestCase):
         self.assertEqual(s3_body["fields"]["age"], 45)
         self.assertFalse(Path(path).exists())
 
-        # Public view keeps legacy keys and exposes fields
-        view = api._case_public_view(meta)
+        # Legacy Behin get-msg: text only, no fields
+        legacy = api._case_public_view(meta)
+        self.assertEqual(legacy["text"], meta["text"])
+        self.assertNotIn("fields", legacy)
+
+        # New get-text: text + fields
+        view = api._case_get_text_view(meta)
         self.assertEqual(view["text"], meta["text"])
         self.assertIn("fields", view)
         self.assertEqual(view["fields"]["age"], 45)
+
+
+class S3PreuploadInputTests(unittest.TestCase):
+    """HakimAI uploads cases/{uuid}/input/audio.* then POSTs uuid only."""
+
+    def test_find_input_audio_key_prefers_webm(self) -> None:
+        with patch(
+            "backend.case_store.storage_object_exists",
+            side_effect=lambda k: k.endswith("audio.webm"),
+        ):
+            key = find_input_audio_key("case-pre")
+        self.assertEqual(key, "cases/case-pre/input/audio.webm")
+
+    def test_find_input_audio_key_falls_back_wav(self) -> None:
+        with patch(
+            "backend.case_store.storage_object_exists",
+            side_effect=lambda k: k.endswith("audio.wav"),
+        ):
+            key = find_input_audio_key("case-pre")
+        self.assertEqual(key, "cases/case-pre/input/audio.wav")
+
+    def test_download_case_input_audio_missing(self) -> None:
+        with patch("backend.case_store.storage_object_exists", return_value=False):
+            with self.assertRaises(FileNotFoundError):
+                download_case_input_audio("missing-case")
+
+    def test_download_case_input_audio_ok(self) -> None:
+        with (
+            patch(
+                "backend.case_store.storage_object_exists",
+                side_effect=lambda k: k.endswith("audio.mp3"),
+            ),
+            patch(
+                "backend.case_store.get_storage_object",
+                return_value=b"fake-mp3",
+            ),
+        ):
+            raw, key = download_case_input_audio("case-pre")
+        self.assertEqual(raw, b"fake-mp3")
+        self.assertEqual(key, "cases/case-pre/input/audio.mp3")
+
+    def test_enqueue_from_s3_queues_worker(self) -> None:
+        import backend.main_api as api
+
+        case_id = "s3-pre-unit-1"
+        submitted: list[tuple] = []
+
+        class FakeExec:
+            def submit(self, fn, *args, **kwargs):
+                submitted.append((fn, args, kwargs))
+
+        with (
+            patch.object(
+                api,
+                "download_case_input_audio",
+                return_value=(b"ID3fake", "cases/s3-pre-unit-1/input/audio.mp3"),
+            ),
+            patch.object(api, "_job_executor", FakeExec()),
+            patch.object(api, "_set_case"),
+            patch.object(api, "new_meta", wraps=new_meta),
+        ):
+            out = api._enqueue_case_audio_from_s3(case_id, "http://127.0.0.1:8000")
+
+        self.assertEqual(out["status"], "queued")
+        self.assertEqual(out["mode"], "audio")
+        self.assertEqual(out["uuid"], case_id)
+        self.assertEqual(len(submitted), 1)
+        fn, args, _ = submitted[0]
+        self.assertIs(fn, api._worker_case_audio)
+        self.assertEqual(args[0], case_id)
+        self.assertTrue(str(args[1]).endswith(".mp3"))
+        Path(args[1]).unlink(missing_ok=True)
+
+    def test_enqueue_from_s3_404_when_missing(self) -> None:
+        import backend.main_api as api
+        from fastapi import HTTPException
+
+        with patch.object(
+            api,
+            "download_case_input_audio",
+            side_effect=FileNotFoundError("missing"),
+        ):
+            with self.assertRaises(HTTPException) as ctx:
+                api._enqueue_case_audio_from_s3("nope", "http://127.0.0.1:8000")
+        self.assertEqual(ctx.exception.status_code, 404)
 
 
 if __name__ == "__main__":

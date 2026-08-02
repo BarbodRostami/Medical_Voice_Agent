@@ -125,7 +125,8 @@ docker compose logs -f backend
 قرارداد سرور خارجی / HakimAI: فایل **[COLLABORATOR_API.md](COLLABORATOR_API.md)**  
 
 - **TTS:** `POST /api/ask` → HakimAI فایل MP3 را مستقیم از S3 پول می‌کند (`s3_key`)  
-- **STT:** `POST /api/cases` + فایل → متن با `GET /api/get-msg?uuid=`
+- **STT قدیم (Behin):** `POST /api/cases` → متن با `GET /api/get-msg?uuid=` (بدون `fields`)  
+- **STT جدید (فرم):** همان cases → `GET /api/get-text?uuid=` یا S3 `{date}/{uuid}.json` (با `fields`)
 
 ### جریان async (پیشنهادی)
 

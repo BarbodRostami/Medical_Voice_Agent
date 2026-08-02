@@ -92,6 +92,21 @@ class FormExtractTests(unittest.TestCase):
         self.assertIn("gender", r["missing"])
         self.assertIn("age", r["missing"])
 
+    def test_collaborator_garbled_stt(self) -> None:
+        """Real collaborator STT garbling must still fill gender/age/height."""
+        r = extract_patient_demographics(
+            "جنس، بیمار، مرد است. سن بیمار، چهل و پنج سال است. "
+            "قد بیمار، سد و حفتاد و پنج سنتی میت است. جنس، بیمار، مرد است."
+        )
+        self.assertEqual(r["gender"], "male")
+        self.assertEqual(r["age"], 45)
+        self.assertEqual(r["height_cm"], 175)
+        self.assertIsNotNone(r["ibw_kg"])
+
+    def test_sen_sal_ast_spoken_age(self) -> None:
+        r = extract_patient_demographics("سن بیمار چهل و پنج سال است")
+        self.assertEqual(r["age"], 45)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -122,6 +122,19 @@ def normalize_persian_text(text: str) -> str:
     t = t.replace("\u200c", " ")
     t = t.replace("\u200f", "").replace("\u200e", "")
     t = t.replace("،", " ").replace(",", " ").replace(";", " ")
+    # Frequent STT garbling on demographics phrases (collaborator TTS→STT)
+    for bad, good in (
+        ("سنتی میت", "سانتی متر"),
+        ("سنتی متر", "سانتی متر"),
+        ("سانتی میتر", "سانتی متر"),
+        ("سانتی میت", "سانتی متر"),
+        ("سانتیمتر", "سانتی متر"),
+        ("حفتاد", "هفتاد"),
+        ("حضتاد", "هفتاد"),
+        ("سد و", "صد و"),
+    ):
+        t = t.replace(bad, good)
+    t = re.sub(r"(^|\s)سد(\s|$)", r"\1صد\2", t)
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
@@ -190,6 +203,16 @@ def _extract_age(text: str) -> int | None:
         if not phrase:
             continue
         val = persian_spoken_number(phrase)
+        if val is not None and 0 < val < 130:
+            return val
+    # سن بیمار چهل و پنج سال است / سن ۴۵ سال
+    m = re.search(
+        r"سن(?:\s*(?:بیمار|او|ایشان))?\s*(?:حدود|تقریباً|تقریبا)?\s*[:\-]?\s*"
+        r"((?:[^\s]+(?:\s+و\s+[^\s]+){0,3}|\d{1,3}))\s*سال\b",
+        text,
+    )
+    if m:
+        val = persian_spoken_number(m.group(1))
         if val is not None and 0 < val < 130:
             return val
     age_m = _AGE_DIGITS.search(text)

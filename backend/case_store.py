@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 
 from backend.medical_voice_utils import (
     get_json_from_storage,
+    get_storage_object,
     put_json_to_storage,
     put_storage_object,
     storage_object_exists,
@@ -173,3 +174,37 @@ def save_collaborator_stt_json(
     key = output_json_key(case_id, day)
     put_json_to_storage(key, payload)
     return key
+
+
+# Common extensions HakimAI / browsers may upload under cases/{uuid}/input/
+_INPUT_AUDIO_EXTS: tuple[str, ...] = (
+    ".webm",
+    ".wav",
+    ".mp3",
+    ".m4a",
+    ".ogg",
+    ".mpeg",
+    ".mp4",
+)
+
+
+def find_input_audio_key(case_id: str) -> str | None:
+    """Return first existing ``cases/{uuid}/input/audio.*`` key, or None."""
+    for ext in _INPUT_AUDIO_EXTS:
+        key = input_audio_key(case_id, ext)
+        if storage_object_exists(key):
+            return key
+    return None
+
+
+def download_case_input_audio(case_id: str) -> tuple[bytes, str]:
+    """Download collaborator-preuploaded input audio from S3.
+
+    Returns ``(bytes, storage_key)``. Raises ``FileNotFoundError`` if missing.
+    """
+    key = find_input_audio_key(case_id)
+    if not key:
+        raise FileNotFoundError(
+            f"No audio object under cases/{case_id}/input/audio.*"
+        )
+    return get_storage_object(key), key

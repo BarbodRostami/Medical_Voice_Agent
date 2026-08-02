@@ -12,6 +12,7 @@ from typing import Literal
 from urllib.parse import urlparse
 
 import tempfile
+from pathlib import Path
 
 # Windows consoles (cp1252) crash on Persian/emoji in print — break STT/case workers.
 if hasattr(sys.stdout, "reconfigure"):
@@ -36,6 +37,7 @@ from backend.audio_security import (
     verify_audio_signature,
 )
 from backend.case_store import (
+    download_case_input_audio,
     load_meta,
     new_meta,
     output_audio_key,
@@ -830,14 +832,17 @@ def _worker_case_audio(case_id: str, audio_path: str, base_url: str) -> None:
     Same collaboration pattern as TTS MP3:
     upload result to ``{YYYY-MM-DD}/{uuid}.json`` for HakimAI to poll on S3.
 
-    Also keeps legacy ``text`` / ``transcript`` / ``answer`` / ``fields`` on
-    GET /api/get-msg for status and older clients. No RAG/LLM on this path.
+    Also keeps legacy ``text`` / ``transcript`` / ``answer`` on
+    GET /api/get-msg. New clients use GET /api/get-text (includes ``fields``)
+    or poll S3 ``{day}/{uuid}.json``. No RAG/LLM on this path.
     """
     del base_url  # reserved for future audio_url links; unused in STT mode
     try:
         _patch_case(case_id, status="processing", message="در حال تبدیل صدا به متن...")
-        _safe_log(f"[case {case_id}] STT started")
-        transcript = transcribe_medical_audio(audio_path, local_model_getter=_get_whisper)
+        _safe_log(f"[case {case_id}] STT started (form demographics)")
+        transcript = transcribe_form_demographics_audio(
+            audio_path, local_model_getter=_get_whisper
+        )
         if not transcript:
             _safe_log(f"[case {case_id}] FAILED: empty transcription")
             _patch_case(
@@ -905,7 +910,8 @@ def _worker_case_audio(case_id: str, audio_path: str, base_url: str) -> None:
             status="ready",
             message=(
                 "تکمیل شد — JSON روی S3 آماده است "
-                f"(کلید {{YYYY-MM-DD}}/{case_id}.json)."
+                f"(کلید {{YYYY-MM-DD}}/{case_id}.json). "
+                "فرم: GET /api/get-text?uuid=... — متن قدیم Behin: GET /api/get-msg"
             ),
             transcript=transcript,
             answer=transcript,
@@ -980,7 +986,51 @@ def _enqueue_case_audio(
         "message": (
             "فایل صوتی دریافت شد — بعد از ready JSON را از S3 با کلید "
             f"{{YYYY-MM-DD}}/{case_id}.json بگیرید (تاریخ تهران). "
-            "وضعیت اختیاری: GET /api/get-msg?uuid=..."
+            "فرم/فیلدها: GET /api/get-text?uuid=... "
+            "متن قدیم Behin: GET /api/get-msg?uuid=..."
+        ),
+    }
+
+
+def _enqueue_case_audio_from_s3(case_id: str, base_url: str) -> dict:
+    """HakimAI already uploaded audio to ``cases/{uuid}/input/audio.*``; only uuid sent."""
+    try:
+        raw, storage_key = download_case_input_audio(case_id)
+    except FileNotFoundError as e:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Audio not found on S3 for uuid={case_id}. "
+                "Upload to cases/{uuid}/input/audio.webm (or .wav/.mp3/…) "
+                "before POST /api/cases with uuid only."
+            ),
+        ) from e
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to download input audio from S3: {e}",
+        ) from e
+
+    if not raw:
+        raise HTTPException(status_code=400, detail="S3 audio object is empty.")
+
+    suffix = Path(storage_key).suffix or ".webm"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(raw)
+        tmp_path = tmp.name
+    meta = new_meta(case_id, mode="audio")
+    meta["input_audio_key"] = storage_key
+    _set_case(meta)
+    _job_executor.submit(_worker_case_audio, case_id, tmp_path, base_url)
+    return {
+        "uuid": case_id,
+        "status": "queued",
+        "mode": "audio",
+        "message": (
+            "صدا از S3 خوانده شد — بعد از ready JSON را با کلید "
+            f"{{YYYY-MM-DD}}/{case_id}.json بگیرید. "
+            "فرم/فیلدها: GET /api/get-text?uuid=... "
+            "متن قدیم Behin: GET /api/get-msg?uuid=..."
         ),
     }
 
@@ -993,10 +1043,11 @@ def _save_input_audio_safe(case_id: str, raw: bytes, suffix: str) -> None:
 
 
 def _case_public_view(meta: dict) -> dict:
-    """Public JSON for HakimAI — no s3_bucket / s3_key fields.
+    """Legacy Behin / HakimAI view for ``GET /api/get-msg`` — no ``fields``.
 
-    Legacy clients keep using ``text`` / ``transcript`` / ``answer``.
-    Newer clients may also read ``fields`` (structured patient-tab JSON).
+    Contract (pre-form-extract): uuid, status, mode, message, text, transcript,
+    answer, audio_url, error, timestamps. Structured form JSON lives on
+    ``GET /api/get-text`` and S3 ``{day}/{uuid}.json`` instead.
     """
     text = meta.get("text") or meta.get("answer") or meta.get("transcript")
     return {
@@ -1007,7 +1058,26 @@ def _case_public_view(meta: dict) -> dict:
         "text": text,
         "transcript": meta.get("transcript"),
         "answer": meta.get("answer"),
+        "audio_url": meta.get("audio_url"),
+        "error": meta.get("error"),
+        "created_at": meta.get("created_at"),
+        "updated_at": meta.get("updated_at"),
+    }
+
+
+def _case_get_text_view(meta: dict) -> dict:
+    """New collaborator view: free-text + structured ``fields`` for form fill."""
+    text = meta.get("text") or meta.get("answer") or meta.get("transcript")
+    return {
+        "uuid": meta.get("uuid"),
+        "status": meta.get("status"),
+        "mode": meta.get("mode"),
+        "message": meta.get("message"),
+        "text": text,
+        "transcript": meta.get("transcript"),
+        "answer": meta.get("answer"),
         "fields": meta.get("fields"),
+        "output_json_key": meta.get("output_json_key"),
         "audio_url": meta.get("audio_url"),
         "error": meta.get("error"),
         "created_at": meta.get("created_at"),
@@ -1144,10 +1214,14 @@ async def create_case(req: Request):
     - **TTS (text):** JSON ``{\"uuid\",\"text\"}`` → we upload MP3 to
       ``{YYYY-MM-DD}/{uuid}.mp3`` (Tehran date). HakimAI polls that key on S3.
       API responses do not expose s3_bucket / s3_key.
-    - **STT (audio):** multipart ``uuid`` + ``file`` → Whisper STT + form fields;
-      we upload JSON to ``{YYYY-MM-DD}/{uuid}.json`` for HakimAI to poll on S3
-      (same pattern as MP3). Optional status via ``GET /api/get-msg?uuid=``.
-      No RAG/LLM — HakimAI owns medical reasoning.
+    - **STT (audio):** either
+        - multipart ``uuid`` + ``file``, or
+        - multipart ``uuid`` only after HakimAI uploaded to
+          ``cases/{uuid}/input/audio.webm`` (or .wav/.mp3/…).
+      We run Whisper + form fields and upload
+      ``{YYYY-MM-DD}/{uuid}.json`` for S3 poll.
+      New: ``GET /api/get-text?uuid=`` (text + fields).
+      Legacy Behin: ``GET /api/get-msg?uuid=`` (text only, no fields).
     """
     content_type = (req.headers.get("content-type") or "").lower()
     base_url = _public_base_url(req)
@@ -1215,10 +1289,8 @@ async def create_case(req: Request):
             file_content_type,
             base_url,
         )
-    raise HTTPException(
-        status_code=400,
-        detail="Provide non-empty text, or an audio file (not both, not neither).",
-    )
+    # uuid only → expect audio already on shared S3 under cases/{uuid}/input/
+    return _enqueue_case_audio_from_s3(case_id, base_url)
 
 
 @app.post(
@@ -1235,7 +1307,7 @@ async def api_ask(body: CaseTextRequest, req: Request):
 
 @app.get(
     "/api/cases/{case_id}",
-    summary="Get case status / audio_url by external uuid",
+    summary="Legacy case status (same as get-msg; no fields)",
 )
 async def get_case(case_id: str):
     try:
@@ -1250,9 +1322,10 @@ async def get_case(case_id: str):
 
 @app.get(
     "/api/get-msg",
-    summary="Alias of GET /api/cases/{uuid} (?uuid=)",
+    summary="Legacy Behin: case text/status (?uuid=) — no fields",
 )
 async def get_msg(uuid: str):
+    """Old HakimAI / Behin contract: text / transcript / answer only."""
     try:
         case_id = validate_case_id(uuid)
     except ValueError as e:
@@ -1261,6 +1334,27 @@ async def get_msg(uuid: str):
     if meta is None:
         raise HTTPException(status_code=404, detail="Case not found.")
     return _case_public_view(meta)
+
+
+@app.get(
+    "/api/get-text",
+    summary="New form-fill: transcript + structured fields (?uuid=)",
+)
+async def get_text(uuid: str):
+    """New collaborator contract for voice → form.
+
+    Returns the same status/text as get-msg, plus ``fields`` (patient-tab JSON)
+    and ``output_json_key`` when ready. Prefer polling S3
+    ``{YYYY-MM-DD}/{uuid}.json`` for production; this endpoint is for status.
+    """
+    try:
+        case_id = validate_case_id(uuid)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    meta = _get_case(case_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Case not found.")
+    return _case_get_text_view(meta)
 
 
 @app.post(
