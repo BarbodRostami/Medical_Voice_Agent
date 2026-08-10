@@ -1,5 +1,5 @@
 """
-EXPERIMENT — Minimal voice → patient form UI.
+EXPERIMENT — Voice → HakimAI form fields (patient + ventilator settings).
 
 Flow:
   1. Greeting TTS once
@@ -44,19 +44,94 @@ from backend.api_auth import request_headers
 from backend.medical_voice_utils import persian_to_voice
 from backend.stt_utils import detect_audio_extension
 
-API_BASE = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
+API_BASE = os.getenv("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 MAX_WAIT = 180
-GREETING = "سلام، چطوری می‌تونم کمکتون کنم؟"
+GREETING = "سلام. متن نمونه تنظیمات ونتیلاتور را بخوانید یا آزاد بگویید."
+
+# Read this aloud to test Settings-tab extraction
+SAMPLE_SCRIPT_VENT = (
+    "مود وی سی وی. "
+    "پیپ پنج. "
+    "فی او دو چهل درصد. "
+    "وی تی پانصد. "
+    "آر آر شانزده. "
+    "فشار دمی بیست. "
+    "پی اس ده."
+)
+
+_PATIENT_KEYS = (
+    "gender",
+    "age",
+    "height_cm",
+    "weight_kg",
+    "ibw_kg",
+    "ventilator_days",
+    "tube_type",
+    "indication",
+    "rass",
+    "covid_status",
+    "main_diagnosis",
+    "diagnosis_category",
+    "sedation_active",
+    "recent_surgery",
+    "fever",
+    "secretion_intensity",
+    "cxr_summary",
+    "consultation_goal",
+)
+_VENT_KEYS = (
+    "ventilator_mode",
+    "vt_set_ml",
+    "pi_cmh2o",
+    "p_hi_cmh2o",
+    "p_lo_cmh2o",
+    "t_hi_sec",
+    "t_lo_sec",
+    "rr_set_bpm",
+    "ti_max_sec",
+    "ps_cmh2o",
+    "cycle_criteria_pct",
+    "rise_time_sec",
+    "trigger_sensitivity_lpm",
+    "peep_cmh2o",
+    "fio2_pct",
+)
 
 _BOOL_KEYS = ("sedation_active", "recent_surgery", "fever")
-_INT_KEYS = ("age", "height_cm", "rass")
-_FLOAT_KEYS = ("weight_kg", "ventilator_days")
+_INT_KEYS = ("age", "height_cm", "rass", "vt_set_ml", "rr_set_bpm")
+_FLOAT_KEYS = (
+    "weight_kg",
+    "ventilator_days",
+    "pi_cmh2o",
+    "p_hi_cmh2o",
+    "p_lo_cmh2o",
+    "t_hi_sec",
+    "t_lo_sec",
+    "ti_max_sec",
+    "ps_cmh2o",
+    "cycle_criteria_pct",
+    "rise_time_sec",
+    "trigger_sensitivity_lpm",
+    "peep_cmh2o",
+    "fio2_pct",
+)
+
+_VENT_MODE_OPTS = [
+    "—",
+    "VCV",
+    "PCV",
+    "SIMV-V",
+    "SIMV-P",
+    "PSV/CPAP",
+    "APRV",
+    "PRVC",
+]
 
 _HIDE_CHROME = """
 <style>
   header, footer, [data-testid="stToolbar"], [data-testid="stDecoration"],
   [data-testid="stStatusWidget"], #MainMenu { visibility: hidden; height: 0; }
-  .block-container { padding-top: 2.5rem !important; max-width: 560px; }
+  .block-container { padding-top: 2rem !important; max-width: 640px; }
   [data-testid="stAudioInput"] label { display: none !important; }
   div[data-testid="stVerticalBlock"] > div:has([data-testid="stAudioInput"]) {
     display: flex; justify-content: center;
@@ -74,6 +149,11 @@ _HIDE_CHROME = """
     font-size: 1.05rem;
     opacity: 0.85;
   }
+  .result-card h4 {
+    margin: 0.9rem 0 0.45rem 0;
+    font-size: 0.92rem;
+    opacity: 0.7;
+  }
   .result-card .row { margin: 0.4rem 0; font-size: 1.02rem; }
   .result-card .label { opacity: 0.6; margin-left: 0.45rem; }
   .result-card .section {
@@ -82,6 +162,22 @@ _HIDE_CHROME = """
     border-top: 1px solid rgba(128,128,128,0.25);
     font-size: 0.85rem;
     opacity: 0.75;
+  }
+  .sample-box {
+    margin: 0.5rem 0 1rem 0;
+    padding: 0.9rem 1.1rem;
+    border-radius: 12px;
+    border: 1px dashed rgba(60,120,200,0.45);
+    background: rgba(60,120,200,0.08);
+    direction: rtl;
+    text-align: right;
+    font-size: 1.02rem;
+    line-height: 1.7;
+  }
+  .sample-box .title {
+    font-size: 0.85rem;
+    opacity: 0.7;
+    margin-bottom: 0.35rem;
   }
   .missing-box {
     margin-top: 0.85rem;
@@ -95,6 +191,47 @@ _HIDE_CHROME = """
   .listening-hint {
     text-align: center; opacity: 0.45; font-size: 0.9rem; margin-top: 1rem;
     direction: rtl;
+  }
+  .vent-panel {
+    margin: 0.75rem 0 1rem 0;
+    padding: 1rem 1.1rem;
+    border: 1px solid rgba(128,128,128,0.35);
+    border-radius: 12px;
+    direction: rtl;
+    text-align: right;
+  }
+  .vent-panel h3 {
+    margin: 0 0 0.75rem 0;
+    font-size: 1.02rem;
+  }
+  .vent-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.55rem 0.75rem;
+  }
+  .vent-field {
+    border-radius: 8px;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid rgba(128,128,128,0.25);
+    background: rgba(128,128,128,0.06);
+  }
+  .vent-field.filled {
+    border-color: rgba(40,140,80,0.55);
+    background: rgba(40,140,80,0.12);
+  }
+  .vent-field .fl {
+    font-size: 0.78rem;
+    opacity: 0.65;
+    margin-bottom: 0.15rem;
+  }
+  .vent-field .fv {
+    font-size: 1.02rem;
+    font-weight: 600;
+    min-height: 1.35rem;
+  }
+  .vent-field.empty .fv {
+    font-weight: 400;
+    opacity: 0.4;
   }
 </style>
 """
@@ -133,7 +270,10 @@ def _stt_extract(
                 "کلید API قبول نشد. مطمئن شو فایل .env برای Streamlit و backend یکی است."
             )
         if r.status_code == 404:
-            raise RuntimeError("Backend را ری‌استارت کنید (endpoint آزمایشی موجود نیست).")
+            raise RuntimeError(
+                f"Endpoint آزمایشی پیدا نشد. Backend را روی {API_BASE} ری‌استارت کنید "
+                "(/experiments/voice-form/stt)."
+            )
         if r.status_code >= 400:
             try:
                 detail = r.json().get("detail") or r.text[:200]
@@ -213,8 +353,7 @@ def _process_audio(
         text = (parsed.get("raw_text") or "").strip()
         if not text and not parsed.get("found"):
             st.session_state["error"] = (
-                "چیزی شنیده نشد. بلندتر و کامل‌تر بگویید "
-                "(مثلاً بیمار خانم سی و دو ساله قد صد و شصت)."
+                "چیزی شنیده نشد. متن نمونه را بلند و واضح بخوانید."
             )
             st.session_state["phase"] = "append" if append else "listen"
         else:
@@ -238,7 +377,6 @@ def _process_audio(
 
 
 def _clipboard_button(payload: str, *, label: str = "کپی JSON") -> None:
-    # URI-encode so Persian JSON survives the HTML bridge
     from urllib.parse import quote
 
     encoded = quote(payload, safe="")
@@ -269,6 +407,18 @@ def _clipboard_button(payload: str, *, label: str = "کپی JSON") -> None:
     )
 
 
+def _render_sample_script() -> None:
+    st.markdown(
+        f"""
+        <div class="sample-box" dir="rtl">
+          <div class="title">متن نمونه — تنظیمات ونتیلاتور (بلند بخوانید)</div>
+          <div>{SAMPLE_SCRIPT_VENT}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _render_mic_upload(*, append: bool, key_suffix: str) -> None:
     if hasattr(st, "audio_input"):
         rec = st.audio_input(
@@ -294,7 +444,7 @@ def _render_mic_upload(*, append: bool, key_suffix: str) -> None:
     hint = (
         "فیلدهای جاافتاده را بگویید یا آپلود کنید"
         if append
-        else "ضبط یا آپلود فایل صوتی"
+        else "ضبط یا آپلود — متن نمونه بالا را بخوانید"
     )
     st.markdown(f'<p class="listening-hint">{hint}</p>', unsafe_allow_html=True)
     if uploaded is not None:
@@ -341,6 +491,9 @@ def _apply_edits_from_widgets() -> dict[str, Any]:
         "متوسط": "moderate",
         "شدید": "severe",
     }.get(covid)
+
+    mode = st.session_state.get("edit_ventilator_mode", "—")
+    edited["ventilator_mode"] = mode if mode in _VENT_MODE_OPTS[1:] else None
 
     for key in _BOOL_KEYS:
         label = st.session_state.get(f"edit_{key}", "—")
@@ -467,21 +620,85 @@ def _render_edit_form(r: dict[str, Any]) -> None:
         height=80,
     )
 
-    # number_input cannot be empty — treat 0 as empty when original was None
-    # (handled in apply by re-reading; for age/height 0 is invalid clinically)
+    st.markdown("##### تنظیمات ونتیلاتور")
+    mode_cur = r.get("ventilator_mode") if r.get("ventilator_mode") in _VENT_MODE_OPTS else "—"
+    st.selectbox(
+        "مود",
+        _VENT_MODE_OPTS,
+        index=_VENT_MODE_OPTS.index(mode_cur) if mode_cur in _VENT_MODE_OPTS else 0,
+        key="edit_ventilator_mode",
+    )
+    v1, v2 = st.columns(2)
+    with v1:
+        st.number_input(
+            "PEEP",
+            min_value=0.0,
+            max_value=40.0,
+            value=float(r["peep_cmh2o"]) if r.get("peep_cmh2o") is not None else 0.0,
+            step=0.5,
+            key="edit_peep_cmh2o",
+        )
+        st.number_input(
+            "VT (ml)",
+            min_value=0,
+            max_value=1200,
+            value=int(r["vt_set_ml"]) if r.get("vt_set_ml") is not None else 0,
+            key="edit_vt_set_ml",
+        )
+        st.number_input(
+            "Pi",
+            min_value=0.0,
+            max_value=60.0,
+            value=float(r["pi_cmh2o"]) if r.get("pi_cmh2o") is not None else 0.0,
+            step=0.5,
+            key="edit_pi_cmh2o",
+        )
+        st.number_input(
+            "PS",
+            min_value=0.0,
+            max_value=40.0,
+            value=float(r["ps_cmh2o"]) if r.get("ps_cmh2o") is not None else 0.0,
+            step=0.5,
+            key="edit_ps_cmh2o",
+        )
+    with v2:
+        st.number_input(
+            "FiO2 (%)",
+            min_value=0.0,
+            max_value=100.0,
+            value=float(r["fio2_pct"]) if r.get("fio2_pct") is not None else 0.0,
+            step=1.0,
+            key="edit_fio2_pct",
+        )
+        st.number_input(
+            "RR",
+            min_value=0,
+            max_value=60,
+            value=int(r["rr_set_bpm"]) if r.get("rr_set_bpm") is not None else 0,
+            key="edit_rr_set_bpm",
+        )
+        st.number_input(
+            "Trigger",
+            min_value=0.0,
+            max_value=20.0,
+            value=float(r["trigger_sensitivity_lpm"])
+            if r.get("trigger_sensitivity_lpm") is not None
+            else 0.0,
+            step=0.1,
+            key="edit_trigger_sensitivity_lpm",
+        )
+
     if st.button("اعمال ویرایش", use_container_width=True, type="primary"):
         applied = _apply_edits_from_widgets()
-        # Clear zero placeholders when original field was empty and user left 0
-        for key in ("age", "height_cm"):
+        for key in ("age", "height_cm", "vt_set_ml", "rr_set_bpm"):
             widget_val = st.session_state.get(f"edit_{key}")
             if widget_val == 0 and r.get(key) is None:
                 applied[key] = None
-        for key in ("weight_kg", "ventilator_days"):
+        for key in _FLOAT_KEYS:
             widget_val = st.session_state.get(f"edit_{key}")
             if widget_val == 0.0 and r.get(key) is None:
                 applied[key] = None
         if st.session_state.get("edit_rass") == 0 and r.get("rass") is None:
-            # Ambiguous: RASS 0 is valid. Keep 0 if user touched; if never set keep None
             applied["rass"] = 0
         applied = finalize_patient_fields(applied, raw_text=r.get("raw_text") or "")
         st.session_state["result"] = applied
@@ -490,37 +707,96 @@ def _render_edit_form(r: dict[str, Any]) -> None:
         st.rerun()
 
 
-def _render_result(r: dict[str, Any]) -> None:
+def _rows_for_keys(r: dict[str, Any], keys: tuple[str, ...]) -> list[str]:
+    found = set(r.get("found") or [])
     rows: list[str] = []
-    for key, label in FIELD_LABELS_FA.items():
-        if key not in (r.get("found") or []):
+    for key in keys:
+        if key not in found:
             continue
+        label = FIELD_LABELS_FA.get(key, key)
         val = format_field_value(key, r.get(key))
         rows.append(
             f'<div class="row"><span class="label">{label}</span>'
             f"<strong>{val}</strong></div>"
         )
-    transcript = (r.get("raw_text") or "").strip()
-    transcript_html = (
-        f'<div class="section">متن: {transcript}</div>' if transcript else ""
+    return rows
+
+
+def _render_vent_settings_form(r: dict[str, Any] | None) -> None:
+    """Always show Settings-tab fields; fill green cells when detected."""
+    data = r or {}
+    found = set(data.get("found") or [])
+    cells: list[str] = []
+    for key in _VENT_KEYS:
+        label = FIELD_LABELS_FA.get(key, key)
+        filled = key in found and data.get(key) is not None
+        if filled:
+            val = format_field_value(key, data.get(key))
+            cls = "vent-field filled"
+        else:
+            val = "—"
+            cls = "vent-field empty"
+        cells.append(
+            f'<div class="{cls}"><div class="fl">{label}</div>'
+            f'<div class="fv">{val}</div></div>'
+        )
+    filled_n = sum(
+        1
+        for k in _VENT_KEYS
+        if k in found and data.get(k) is not None
     )
     st.markdown(
         f"""
-        <div class="result-card" dir="rtl">
-          <h3>اطلاعات استخراج‌شده</h3>
-          {"".join(rows) if rows else "<div class='row'>—</div>"}
-          {transcript_html}
+        <div class="vent-panel" dir="rtl">
+          <h3>تنظیمات ونتیلاتور
+            <span style="opacity:0.55;font-size:0.85rem;font-weight:400;">
+              ({filled_n}/{len(_VENT_KEYS)} پر شده)
+            </span>
+          </h3>
+          <div class="vent-grid">{"".join(cells)}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    missing = [k for k in (r.get("missing") or []) if k != "ibw_kg"]
-    if missing:
-        labels = "، ".join(FIELD_LABELS_FA[k] for k in missing[:10])
-        more = " …" if len(missing) > 10 else ""
+
+def _render_result(r: dict[str, Any]) -> None:
+    _render_vent_settings_form(r)
+
+    patient_rows = _rows_for_keys(r, _PATIENT_KEYS)
+    transcript = (r.get("raw_text") or "").strip()
+    transcript_html = (
+        f'<div class="section">متن: {transcript}</div>' if transcript else ""
+    )
+    if patient_rows:
         st.markdown(
-            f'<div class="missing-box">هنوز نگفتید: {labels}{more}</div>',
+            f"""
+            <div class="result-card" dir="rtl">
+              <h3>تب بیمار (در صورت تشخیص)</h3>
+              {"".join(patient_rows)}
+              {transcript_html}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    elif transcript:
+        st.markdown(
+            f"""
+            <div class="result-card" dir="rtl">
+              <h3>متن شنیده‌شده</h3>
+              {transcript_html}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    missing = [k for k in (r.get("missing") or []) if k != "ibw_kg"]
+    vent_missing = [k for k in missing if k in _VENT_KEYS]
+    if vent_missing:
+        labels = "، ".join(FIELD_LABELS_FA[k] for k in vent_missing[:10])
+        more = " …" if len(vent_missing) > 10 else ""
+        st.markdown(
+            f'<div class="missing-box">هنوز از تنظیمات نگفتید: {labels}{more}</div>',
             unsafe_allow_html=True,
         )
 
@@ -531,7 +807,7 @@ def _render_result(r: dict[str, Any]) -> None:
     )
     _clipboard_button(payload)
 
-    with st.expander("مشاهده JSON", expanded=False):
+    with st.expander("مشاهده JSON", expanded=True):
         st.code(payload, language="json")
 
     with st.expander("ویرایش دستی", expanded=False):
@@ -562,7 +838,11 @@ def _render_result(r: dict[str, Any]) -> None:
 
 # ─── Page ────────────────────────────────────────────────────────────────────
 
-st.set_page_config(page_title=" ", layout="centered", initial_sidebar_state="collapsed")
+st.set_page_config(
+    page_title="تست ویس → تنظیمات ونتیلاتور",
+    layout="centered",
+    initial_sidebar_state="collapsed",
+)
 st.markdown(_HIDE_CHROME, unsafe_allow_html=True)
 
 for key, default in (
@@ -595,6 +875,8 @@ elif phase == "processing":
     st.markdown('<p class="listening-hint">...</p>', unsafe_allow_html=True)
 
 elif phase == "append":
+    _render_sample_script()
+    _render_vent_settings_form(st.session_state.get("result"))
     st.markdown(
         '<p class="listening-hint">ادامه بدهید — فیلدهای قبلی نگه داشته می‌شوند</p>',
         unsafe_allow_html=True,
@@ -607,6 +889,8 @@ elif phase == "append":
         st.caption(st.session_state["error"])
 
 else:
+    _render_sample_script()
+    _render_vent_settings_form(st.session_state.get("result"))
     _render_mic_upload(append=False, key_suffix="main")
     if st.session_state.get("error"):
         st.caption(st.session_state["error"])

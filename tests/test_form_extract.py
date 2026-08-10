@@ -4,6 +4,7 @@ from __future__ import annotations
 import unittest
 
 from backend.experiments.form_extract import (
+    FIELD_LABELS_FA,
     compute_ibw_kg,
     confirmation_speech_fa,
     export_fields_payload,
@@ -106,6 +107,65 @@ class FormExtractTests(unittest.TestCase):
     def test_sen_sal_ast_spoken_age(self) -> None:
         r = extract_patient_demographics("سن بیمار چهل و پنج سال است")
         self.assertEqual(r["age"], 45)
+
+    def test_ventilator_settings_required(self) -> None:
+        r = extract_patient_demographics(
+            "مود VCV پیپ پنج فی او دو چهل درصد"
+        )
+        self.assertEqual(r["ventilator_mode"], "VCV")
+        self.assertEqual(r["peep_cmh2o"], 5.0)
+        self.assertEqual(r["fio2_pct"], 40.0)
+        self.assertIn("ventilator_mode", r["found"])
+        self.assertIn("peep_cmh2o", r["found"])
+        self.assertIn("fio2_pct", r["found"])
+        # Patient keys still present in schema
+        self.assertIn("gender", r["missing"])
+        self.assertIn("ventilator_mode", FIELD_LABELS_FA)
+
+    def test_ventilator_modes_dropdown(self) -> None:
+        from backend.experiments.form_extract import _extract_ventilator_mode
+
+        cases = {
+            "مود پی سی وی": "PCV",
+            "SIMV-V": "SIMV-V",
+            "simv p": "SIMV-P",
+            "PSV / CPAP": "PSV/CPAP",
+            "APRV": "APRV",
+            "PRVC": "PRVC",
+            "وی سی وی": "VCV",
+        }
+        for spoken, expected in cases.items():
+            self.assertEqual(
+                _extract_ventilator_mode(spoken),
+                expected,
+                msg=spoken,
+            )
+
+    def test_ventilator_extra_params(self) -> None:
+        r = extract_patient_demographics(
+            "مود PCV وی تی پانصد آر آر شانزده فشار دمی بیست "
+            "پی اس ده تریگر دو"
+        )
+        self.assertEqual(r["ventilator_mode"], "PCV")
+        self.assertEqual(r["vt_set_ml"], 500)
+        self.assertEqual(r["rr_set_bpm"], 16)
+        self.assertEqual(r["pi_cmh2o"], 20.0)
+        self.assertEqual(r["ps_cmh2o"], 10.0)
+        self.assertEqual(r["trigger_sensitivity_lpm"], 2.0)
+
+    def test_patient_fields_unchanged_with_vent_schema(self) -> None:
+        """Adding vent keys must not break classic patient extract."""
+        r = extract_patient_demographics(
+            "بیمار آقای ۴۵ ساله با قد ۱۷۵ سانتی‌متر وزن ۸۰ کیلو تب دارد"
+        )
+        self.assertEqual(r["gender"], "male")
+        self.assertEqual(r["age"], 45)
+        self.assertEqual(r["height_cm"], 175)
+        self.assertEqual(r["weight_kg"], 80.0)
+        self.assertTrue(r["fever"])
+        self.assertIsNone(r["ventilator_mode"])
+        self.assertIsNone(r["peep_cmh2o"])
+        self.assertIsNone(r["fio2_pct"])
 
 
 if __name__ == "__main__":

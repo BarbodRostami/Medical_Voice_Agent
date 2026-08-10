@@ -1,6 +1,7 @@
-"""EXPERIMENT ONLY — extract HakimAI-like patient-tab fields from Persian speech.
+"""Extract HakimAI form fields from Persian speech (patient + ventilator settings).
 
-Isolated from production HakimAI contract. Used by ``voice_form_ui.py``.
+Used by voice-form experiment UI and collaborator ``/api/cases`` → ``fields``.
+Patient-tab keys stay stable; ventilator Settings-tab keys are additive.
 """
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ EXTRACT_VERSION = "patient-tab-v1"
 
 # Persian labels for UI (order matters for display)
 FIELD_LABELS_FA: dict[str, str] = {
+    # --- Patient tab ---
     "gender": "جنس",
     "age": "سن (سال)",
     "height_cm": "قد (cm)",
@@ -31,7 +33,45 @@ FIELD_LABELS_FA: dict[str, str] = {
     "secretion_intensity": "شدت ترشحات",
     "cxr_summary": "خلاصه CXR",
     "consultation_goal": "سوال / هدف مشاوره",
+    # --- Ventilator settings tab (additive; does not remove patient keys) ---
+    "ventilator_mode": "مود ونتیلاتور",
+    "vt_set_ml": "VT set (ml)",
+    "pi_cmh2o": "Pi فشار دمی (cmH2O)",
+    "p_hi_cmh2o": "P Hi (cmH2O)",
+    "p_lo_cmh2o": "P Lo (cmH2O)",
+    "t_hi_sec": "T Hi (sec)",
+    "t_lo_sec": "T Lo (sec)",
+    "rr_set_bpm": "RR set (bpm)",
+    "ti_max_sec": "Ti max (sec)",
+    "ps_cmh2o": "PS حمایت تنفسی (cmH2O)",
+    "cycle_criteria_pct": "Cycle criteria (%)",
+    "rise_time_sec": "Rise time (sec)",
+    "trigger_sensitivity_lpm": "Trigger sensitivity (L/min)",
+    "peep_cmh2o": "PEEP set (cmH2O)",
+    "fio2_pct": "FiO2 (%)",
 }
+
+# HakimAI Settings-tab mode dropdown values (exact strings for UI mapping)
+VentilatorMode = Literal[
+    "VCV",
+    "PCV",
+    "SIMV-V",
+    "SIMV-P",
+    "PSV/CPAP",
+    "APRV",
+    "PRVC",
+]
+
+# Longer / more specific patterns first
+_VENT_MODE_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("PRVC", r"\bprvc\b|پی\s*آر\s*وی\s*سی|حجم\s*تنظیم\s*شده\s*با\s*فشار"),
+    ("APRV", r"\baprv\b|ای\s*پی\s*آر\s*وی|اِی\s*پی\s*آر\s*وی"),
+    ("SIMV-V", r"simv[\s\-]?v\b|سیم\s*وی[\s\-]?وی|سیموی\s*حجمی|simv\s*حجمی"),
+    ("SIMV-P", r"simv[\s\-]?p\b|سیم\s*وی[\s\-]?پی|سیموی\s*فشاری|simv\s*فشاری"),
+    ("PSV/CPAP", r"psv\s*/\s*cpap|\bpsv\b|\bcpap\b|پی\s*اس\s*وی|سی\s*پپ|سیپپ|مود\s*حمایتی"),
+    ("VCV", r"\bvcv\b|وی\s*سی\s*وی|مود\s*حجمی|volume\s*control|کنترل\s*حجمی"),
+    ("PCV", r"\bpcv\b|پی\s*سی\s*وی|مود\s*فشاری|pressure\s*control|کنترل\s*فشاری"),
+)
 
 DIAGNOSIS_CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("ARDS", ("ards", "آردز", "ای آر دی اس")),
@@ -89,7 +129,21 @@ _TENS: dict[str, int] = {
     "هشتاد": 80,
     "نود": 90,
 }
-_ALL_WORDS = {**_UNITS, **_TEENS, **_TENS, "صد": 100, "یکصد": 100}
+_ALL_WORDS = {
+    **_UNITS,
+    **_TEENS,
+    **_TENS,
+    "صد": 100,
+    "یکصد": 100,
+    "دویست": 200,
+    "سیصد": 300,
+    "چهارصد": 400,
+    "پانصد": 500,
+    "ششصد": 600,
+    "هفتصد": 700,
+    "هشتصد": 800,
+    "نهصد": 900,
+}
 
 _AGE_DIGITS = re.compile(
     r"(?:"
@@ -430,6 +484,256 @@ def _extract_secretion(text: str) -> str | None:
     return None
 
 
+def _extract_ventilator_mode(text: str) -> str | None:
+    """Map spoken / written mode to HakimAI Settings dropdown values."""
+    for mode, pattern in _VENT_MODE_PATTERNS:
+        if re.search(pattern, text, re.I):
+            return mode
+    # Explicit «مود …» catch-all after specific patterns
+    m = re.search(
+        r"مود(?:\s*(?:ونتیلاتور|ونتیلاتور|دستگاه))?\s*[:\-]?\s*"
+        r"([A-Za-zآ-ی0-9\s\-/]+?)(?=(?:peep|پیپ|fio2|فی|vt|وی\s*تی|rr|سن|قد|وزن|لوله|$|\.))",
+        text,
+        re.I,
+    )
+    if m:
+        chunk = normalize_persian_text(m.group(1))
+        for mode, pattern in _VENT_MODE_PATTERNS:
+            if re.search(pattern, chunk, re.I):
+                return mode
+    return None
+
+
+def _number_after_labels(
+    text: str,
+    labels: tuple[str, ...],
+    *,
+    min_v: float,
+    max_v: float,
+    as_int: bool = False,
+) -> float | int | None:
+    """Find a numeric (digit or spoken Persian) value after any label."""
+    label_re = "|".join(labels)
+    # digits first
+    m = re.search(
+        rf"(?:{label_re})\s*(?:set|ست)?\s*[:\-]?\s*(\d+(?:\.\d+)?)",
+        text,
+        re.I,
+    )
+    if m:
+        val = float(m.group(1))
+        if min_v <= val <= max_v:
+            return int(val) if as_int and val == int(val) else (int(val) if as_int else val)
+    # spoken: label + up to 4 Persian number words
+    m = re.search(
+        rf"(?:{label_re})\s*(?:set|ست)?\s*[:\-]?\s*"
+        r"((?:[^\s]+(?:\s+و\s+[^\s]+){0,3}))",
+        text,
+        re.I,
+    )
+    if m:
+        phrase = m.group(1).strip()
+        # strip trailing unit words so persian_spoken_number can parse
+        phrase = re.sub(
+            r"\s*(?:درصد|percent|%|سانتی|cmh2o|cm\s*h2o|میلی[\s\-]?لیتر|ml|"
+            r"ثانیه|sec|bpm|لیتر(?:\s*بر\s*دقیقه)?|l/?min).*$",
+            "",
+            phrase,
+            flags=re.I,
+        ).strip()
+        val_i = persian_spoken_number(phrase)
+        if val_i is not None and min_v <= val_i <= max_v:
+            return int(val_i) if as_int else float(val_i)
+    return None
+
+
+def _extract_peep(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"peep\s*set",
+            r"peep",
+            r"پیپ",
+            r"پی\s*ای\s*ای\s*پی",
+            r"پی\s*ایپ",
+            r"فشار\s*انتهای\s*بازدم",
+        ),
+        min_v=0,
+        max_v=40,
+    )
+
+
+def _extract_fio2(text: str) -> float | None:
+    # Prefer explicit FiO2 / اکسیژن درصد
+    val = _number_after_labels(
+        text,
+        (
+            r"fio2",
+            r"fi\s*o\s*2",
+            r"فی\s*او\s*دو",
+            r"فیو\s*دو",
+            r"اکسیژن(?:\s*الهامی)?",
+            r"درصد\s*اکسیژن",
+        ),
+        min_v=21,
+        max_v=100,
+    )
+    if val is not None:
+        return float(val)
+    # «اکسیژن چهل درصد»
+    m = re.search(
+        r"اکسیژن\s*((?:[^\s]+(?:\s+و\s+[^\s]+){0,2}|\d{2,3}))\s*(?:درصد|percent|%)",
+        text,
+        re.I,
+    )
+    if m:
+        raw = m.group(1)
+        if re.fullmatch(r"\d+(?:\.\d+)?", raw):
+            v = float(raw)
+        else:
+            spoken = persian_spoken_number(raw)
+            v = float(spoken) if spoken is not None else None
+        if v is not None and 21 <= v <= 100:
+            return v
+    return None
+
+
+def _extract_vt_set(text: str) -> int | None:
+    val = _number_after_labels(
+        text,
+        (
+            r"vt\s*set",
+            r"\bvt\b",
+            r"وی\s*تی",
+            r"حجم\s*(?:جزر\s*و\s*مدی|tidal)",
+            r"tidal\s*volume",
+        ),
+        min_v=100,
+        max_v=1200,
+        as_int=True,
+    )
+    return int(val) if val is not None else None
+
+
+def _extract_rr_set(text: str) -> int | None:
+    val = _number_after_labels(
+        text,
+        (
+            r"rr\s*set",
+            r"\brr\b",
+            r"آر\s*آر",
+            r"نرخ\s*تنفس",
+            r"تعداد\s*تنفس",
+            r"respiratory\s*rate",
+        ),
+        min_v=4,
+        max_v=60,
+        as_int=True,
+    )
+    return int(val) if val is not None else None
+
+
+def _extract_pi(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"\bpi\b", r"پی\s*آی", r"فشار\s*دمی", r"inspiratory\s*pressure"),
+        min_v=0,
+        max_v=60,
+    )
+
+
+def _extract_ps(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"\bps\b",
+            r"پی\s*اس",
+            r"فشار\s*حمایت",
+            r"حمایت\s*تنفسی",
+            r"pressure\s*support",
+        ),
+        min_v=0,
+        max_v=40,
+    )
+
+
+def _extract_p_hi(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"p\s*hi", r"پی\s*های", r"پی\s*های", r"فشار\s*بالا"),
+        min_v=0,
+        max_v=60,
+    )
+
+
+def _extract_p_lo(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"p\s*lo", r"پی\s*لو", r"فشار\s*پایین"),
+        min_v=0,
+        max_v=40,
+    )
+
+
+def _extract_t_hi(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"t\s*hi", r"تی\s*های", r"زمان\s*بالا"),
+        min_v=0.1,
+        max_v=30,
+    )
+
+
+def _extract_t_lo(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"t\s*lo", r"تی\s*لو", r"زمان\s*پایین"),
+        min_v=0.1,
+        max_v=30,
+    )
+
+
+def _extract_ti_max(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"ti\s*max", r"تی\s*آی\s*مکس", r"تی\s*آی\s*макс", r"زمان\s*دم\s*حداکثر"),
+        min_v=0.1,
+        max_v=10,
+    )
+
+
+def _extract_cycle_criteria(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"cycle\s*criteria", r"سایکل\s*کرایتریا", r"معیار\s*سیکل"),
+        min_v=1,
+        max_v=100,
+    )
+
+
+def _extract_rise_time(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"rise\s*time", r"رایز\s*تایم", r"زمان\s*صعود"),
+        min_v=0,
+        max_v=5,
+    )
+
+
+def _extract_trigger_sensitivity(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"trigger\s*sensitivity",
+            r"trigger\s*flow",
+            r"تریگر",
+            r"حساسیت\s*تریگر",
+        ),
+        min_v=0.1,
+        max_v=20,
+    )
+
+
 def _extract_after_keyword(text: str, keywords: tuple[str, ...], max_len: int = 120) -> str | None:
     for kw in keywords:
         m = re.search(
@@ -472,13 +776,24 @@ def format_field_value(key: str, value: Any) -> str:
         return f"{value} kg"
     if key == "ventilator_days":
         return f"{value} روز"
+    if key == "ventilator_mode":
+        return str(value)
+    if key == "peep_cmh2o":
+        return f"{value} cmH2O"
+    if key == "fio2_pct":
+        return f"{value}%"
+    if key == "vt_set_ml":
+        return f"{value} ml"
+    if key == "rr_set_bpm":
+        return f"{value} bpm"
     return str(value)
 
 
 def extract_patient_demographics(transcript: str) -> dict[str, Any]:
-    """Parse patient-tab fields from free Persian (or mixed) text.
+    """Parse HakimAI form fields (patient tab + ventilator settings) from speech text.
 
     Backward-compatible name; returns flat keys + found/missing lists.
+    Existing patient keys are unchanged; vent settings are additive.
     """
     raw = (transcript or "").strip()
     text = normalize_persian_text(raw)
@@ -499,7 +814,6 @@ def extract_patient_demographics(transcript: str) -> dict[str, Any]:
         ("تشخیص اصلی", "تشخیص", "diagnosis"),
         max_len=160,
     )
-    # If category found but no free diagnosis, use category as soft hint only in found list
     sedation_active = _extract_bool_flag(
         text,
         ("sedation فعال", "سدیشن فعال", "تحت sedation", "sedation", "سدیشن"),
@@ -521,6 +835,23 @@ def extract_patient_demographics(transcript: str) -> dict[str, Any]:
         max_len=200,
     )
 
+    # Ventilator settings tab (additive)
+    ventilator_mode = _extract_ventilator_mode(text)
+    vt_set_ml = _extract_vt_set(text)
+    pi_cmh2o = _extract_pi(text)
+    p_hi_cmh2o = _extract_p_hi(text)
+    p_lo_cmh2o = _extract_p_lo(text)
+    t_hi_sec = _extract_t_hi(text)
+    t_lo_sec = _extract_t_lo(text)
+    rr_set_bpm = _extract_rr_set(text)
+    ti_max_sec = _extract_ti_max(text)
+    ps_cmh2o = _extract_ps(text)
+    cycle_criteria_pct = _extract_cycle_criteria(text)
+    rise_time_sec = _extract_rise_time(text)
+    trigger_sensitivity_lpm = _extract_trigger_sensitivity(text)
+    peep_cmh2o = _extract_peep(text)
+    fio2_pct = _extract_fio2(text)
+
     fields: dict[str, Any] = {
         "gender": gender,
         "age": age,
@@ -540,6 +871,21 @@ def extract_patient_demographics(transcript: str) -> dict[str, Any]:
         "secretion_intensity": secretion_intensity,
         "cxr_summary": cxr_summary,
         "consultation_goal": consultation_goal,
+        "ventilator_mode": ventilator_mode,
+        "vt_set_ml": vt_set_ml,
+        "pi_cmh2o": pi_cmh2o,
+        "p_hi_cmh2o": p_hi_cmh2o,
+        "p_lo_cmh2o": p_lo_cmh2o,
+        "t_hi_sec": t_hi_sec,
+        "t_lo_sec": t_lo_sec,
+        "rr_set_bpm": rr_set_bpm,
+        "ti_max_sec": ti_max_sec,
+        "ps_cmh2o": ps_cmh2o,
+        "cycle_criteria_pct": cycle_criteria_pct,
+        "rise_time_sec": rise_time_sec,
+        "trigger_sensitivity_lpm": trigger_sensitivity_lpm,
+        "peep_cmh2o": peep_cmh2o,
+        "fio2_pct": fio2_pct,
     }
     found = [k for k, v in fields.items() if v is not None]
     # IBW alone shouldn't count as "heard" — only when gender+height present
@@ -627,6 +973,11 @@ def confirmation_speech_fa(result: dict[str, Any], *, max_items: int = 6) -> str
         "age",
         "height_cm",
         "weight_kg",
+        "ventilator_mode",
+        "peep_cmh2o",
+        "fio2_pct",
+        "vt_set_ml",
+        "rr_set_bpm",
         "ventilator_days",
         "tube_type",
         "indication",
