@@ -1,7 +1,7 @@
-"""Extract HakimAI form fields from Persian speech (patient + ventilator settings).
+"""Extract HakimAI form fields from Persian speech (patient + settings + measurement).
 
 Used by voice-form experiment UI and collaborator ``/api/cases`` → ``fields``.
-Patient-tab keys stay stable; ventilator Settings-tab keys are additive.
+Patient and Settings keys stay stable; Measurement-tab keys are additive.
 """
 from __future__ import annotations
 
@@ -49,6 +49,29 @@ FIELD_LABELS_FA: dict[str, str] = {
     "trigger_sensitivity_lpm": "Trigger sensitivity (L/min)",
     "peep_cmh2o": "PEEP set (cmH2O)",
     "fio2_pct": "FiO2 (%)",
+    # --- Measurement tab (additive) ---
+    "rr_total_bpm": "RR total (bpm)",
+    "rr_spontaneous_bpm": "RR spontaneous (bpm)",
+    "vte_ml": "VTe (mL)",
+    "vt_ibw_ml_kg": "VT/IBW (mL/kg)",
+    "minute_ventilation_lpm": "Minute ventilation (L/min)",
+    "spontaneous_mv_lpm": "Spontaneous MV (L/min)",
+    "peak_pressure_cmh2o": "Peak pressure (cmH2O)",
+    "plateau_pressure_cmh2o": "Plateau pressure (cmH2O)",
+    "peep_measured_cmh2o": "PEEP measured (cmH2O)",
+    "auto_peep_cmh2o": "Auto-PEEP (cmH2O)",
+    "mean_pressure_cmh2o": "Mean pressure (cmH2O)",
+    "driving_pressure_cmh2o": "Driving Pressure (cmH2O)",
+    "ie_ratio": "I:E",
+    "peak_flow_insp_lpm": "Peak flow inspiratory (L/min)",
+    "peak_flow_exp_lpm": "Peak flow expiratory (L/min)",
+    "r_inspiratory": "R inspiratory (cmH2O/L/s)",
+    "rcexp_sec": "RCexp (sec)",
+    "compliance_static": "Compliance static (mL/cmH2O)",
+    "compliance_dynamic": "Compliance dynamic (mL/cmH2O)",
+    "wob_jl": "WOB (J/L)",
+    "rsbi": "RSBI",
+    "leak_pct": "Leak (%)",
 }
 
 # HakimAI Settings-tab mode dropdown values (exact strings for UI mapping)
@@ -548,16 +571,31 @@ def _number_after_labels(
 
 
 def _extract_peep(text: str) -> float | None:
-    return _number_after_labels(
+    """Settings-tab PEEP set (not measured / auto-peep)."""
+    val = _number_after_labels(
         text,
         (
             r"peep\s*set",
-            r"peep",
-            r"پیپ",
-            r"پی\s*ای\s*ای\s*پی",
-            r"پی\s*ایپ",
-            r"فشار\s*انتهای\s*بازدم",
+            r"پیپ\s*ست",
+            r"پی\s*ای\s*ای\s*پی\s*ست",
         ),
+        min_v=0,
+        max_v=40,
+    )
+    if val is not None:
+        return float(val)
+    # Strip measured/auto phrases so bare peep/پیپ does not steal them
+    cleaned = re.sub(
+        r"(?:auto[\s\-]?peep|اتو\s*پیپ|peep\s*measured|measured\s*peep|"
+        r"پیپ\s*اندازه(?:\s*|‌)?گیری(?:\s*شده)?|peep\s*total)"
+        r"[^\d]{0,20}\d+(?:\.\d+)?",
+        " ",
+        text,
+        flags=re.I,
+    )
+    return _number_after_labels(
+        cleaned,
+        (r"peep", r"پیپ", r"پی\s*ای\s*ای\s*پی", r"پی\s*ایپ"),
         min_v=0,
         max_v=40,
     )
@@ -603,16 +641,34 @@ def _extract_vt_set(text: str) -> int | None:
         text,
         (
             r"vt\s*set",
-            r"\bvt\b",
-            r"وی\s*تی",
-            r"حجم\s*(?:جزر\s*و\s*مدی|tidal)",
-            r"tidal\s*volume",
+            r"وی\s*تی\s*ست",
+            r"tidal\s*volume\s*set",
         ),
         min_v=100,
         max_v=1200,
         as_int=True,
     )
-    return int(val) if val is not None else None
+    if val is not None:
+        return int(val)
+    # bare VT / وی تی — but not VTe / وی تی ای
+    if re.search(r"vte|وی\s*تی\s*ای", text, re.I):
+        m = re.search(
+            r"(?:vt\s*set|وی\s*تی\s*ست)\s*[:\-]?\s*(\d{2,4})",
+            text,
+            re.I,
+        )
+        if m:
+            v = int(m.group(1))
+            if 100 <= v <= 1200:
+                return v
+        return None
+    return _number_after_labels(
+        text,
+        (r"\bvt\b", r"وی\s*تی", r"حجم\s*(?:جزر\s*و\s*مدی|tidal)", r"tidal\s*volume"),
+        min_v=100,
+        max_v=1200,
+        as_int=True,
+    )
 
 
 def _extract_rr_set(text: str) -> int | None:
@@ -620,17 +676,26 @@ def _extract_rr_set(text: str) -> int | None:
         text,
         (
             r"rr\s*set",
-            r"\brr\b",
-            r"آر\s*آر",
-            r"نرخ\s*تنفس",
-            r"تعداد\s*تنفس",
-            r"respiratory\s*rate",
+            r"آر\s*آر\s*ست",
+            r"نرخ\s*تنفس\s*ست",
+            r"set\s*respiratory\s*rate",
         ),
         min_v=4,
         max_v=60,
         as_int=True,
     )
-    return int(val) if val is not None else None
+    if val is not None:
+        return int(val)
+    # bare RR only when total/spontaneous not present
+    if re.search(r"rr\s*total|rr\s*spont|آر\s*آر\s*توتال|آر\s*آر\s*اسپانت", text, re.I):
+        return None
+    return _number_after_labels(
+        text,
+        (r"\brr\b", r"آر\s*آر", r"نرخ\s*تنفس", r"تعداد\s*تنفس", r"respiratory\s*rate"),
+        min_v=4,
+        max_v=60,
+        as_int=True,
+    )
 
 
 def _extract_pi(text: str) -> float | None:
@@ -731,6 +796,326 @@ def _extract_trigger_sensitivity(text: str) -> float | None:
         ),
         min_v=0.1,
         max_v=20,
+    )
+
+
+# ─── Measurement tab ─────────────────────────────────────────────────────────
+
+def _extract_rr_total(text: str) -> int | None:
+    val = _number_after_labels(
+        text,
+        (
+            r"rr\s*total",
+            r"آر\s*آر\s*توتال",
+            r"آر\s*آر\s*کل",
+            r"تنفس\s*کل",
+            r"تعداد\s*تنفس\s*کل",
+            r"total\s*(?:respiratory\s*)?rate",
+        ),
+        min_v=4,
+        max_v=80,
+        as_int=True,
+    )
+    return int(val) if val is not None else None
+
+
+def _extract_rr_spontaneous(text: str) -> int | None:
+    val = _number_after_labels(
+        text,
+        (
+            r"rr\s*spontaneous",
+            r"rr\s*spont",
+            r"آر\s*آر\s*اسپانتانیوس",
+            r"آر\s*آر\s*اسپانت",
+            r"تنفس\s*خودبخودی",
+            r"تنفس\s*اسپانتانیوس",
+            r"spontaneous\s*(?:respiratory\s*)?rate",
+        ),
+        min_v=0,
+        max_v=80,
+        as_int=True,
+    )
+    return int(val) if val is not None else None
+
+
+def _extract_vte(text: str) -> int | None:
+    val = _number_after_labels(
+        text,
+        (
+            r"vte",
+            r"vt\s*e\b",
+            r"وی\s*تی\s*ای",
+            r"حجم\s*بازدمی",
+            r"expired\s*(?:tidal\s*)?volume",
+        ),
+        min_v=50,
+        max_v=1200,
+        as_int=True,
+    )
+    return int(val) if val is not None else None
+
+
+def _extract_vt_ibw(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"vt\s*/\s*ibw", r"vt\s*ibw", r"وی\s*تی\s*بر\s*آی\s*بی\s*دبلیو", r"وی\s*تی\s*آی\s*بی\s*دبلیو"),
+        min_v=2,
+        max_v=20,
+    )
+
+
+def _extract_minute_ventilation(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"minute\s*ventilation",
+            r"\bmv\b",
+            r"تهویه\s*دقیقه‌ای",
+            r"مینیت\s*ونتیلیشن",
+            r"مینا\s*ونتیلیشن",
+        ),
+        min_v=0.5,
+        max_v=40,
+    )
+
+
+def _extract_spontaneous_mv(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"spontaneous\s*mv",
+            r"spont\s*mv",
+            r"اسپانتانیوس\s*ام\s*وی",
+            r"تهویه\s*خودبخودی",
+        ),
+        min_v=0,
+        max_v=40,
+    )
+
+
+def _extract_peak_pressure(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"peak\s*pressure",
+            r"ppeak",
+            r"pip\b",
+            r"پیک\s*پرشر",
+            r"فشار\s*پیک",
+            r"فشار\s*اوج",
+        ),
+        min_v=0,
+        max_v=80,
+    )
+
+
+def _extract_plateau_pressure(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"plateau\s*pressure",
+            r"pplat",
+            r"پلاتو",
+            r"فشار\s*پلاتو",
+        ),
+        min_v=0,
+        max_v=80,
+    )
+
+
+def _extract_peep_measured(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"peep\s*measured",
+            r"measured\s*peep",
+            r"پیپ\s*اندازه(?:‌| )?گیری(?:\s*شده)?",
+            r"پیپ\s*اندازه‌گیری",
+            r"peep\s*total",
+        ),
+        min_v=0,
+        max_v=40,
+    )
+
+
+def _extract_auto_peep(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"auto[\s\-]?peep",
+            r"intrinsic\s*peep",
+            r"اتو\s*پیپ",
+            r"اتوپیب",
+            r"پیپ\s*ذاتی",
+        ),
+        min_v=0,
+        max_v=30,
+    )
+
+
+def _extract_mean_pressure(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"mean\s*pressure",
+            r"pmean",
+            r"میانگین\s*فشار",
+            r"فشار\s*متوسط",
+            r"مین\s*پرشر",
+        ),
+        min_v=0,
+        max_v=50,
+    )
+
+
+def _extract_driving_pressure(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"driving\s*pressure",
+            r"درایوینگ\s*پرشر",
+            r"فشار\s*محرک",
+            r"دلتا\s*پی",
+            r"delta\s*p\b",
+        ),
+        min_v=0,
+        max_v=50,
+    )
+
+
+def _extract_ie_ratio(text: str) -> str | None:
+    m = re.search(
+        r"(?:i\s*:\s*e|آی\s*[:\-]?\s*ای|نسبت\s*دم\s*(?:به\s*)?بازدم)\s*[:\-]?\s*"
+        r"([^\s]+)\s*(?:[:]|به)\s*([^\s]+)",
+        text,
+        re.I,
+    )
+    if not m:
+        return None
+    left_raw = m.group(1).strip(" .،")
+    right_raw = m.group(2).strip(" .،")
+    if re.fullmatch(r"\d+(?:\.\d+)?", left_raw):
+        left: str | None = left_raw
+    else:
+        spoken_l = persian_spoken_number(left_raw)
+        left = str(spoken_l) if spoken_l is not None else None
+    if re.fullmatch(r"\d+(?:\.\d+)?", right_raw):
+        right: str | None = right_raw
+    else:
+        spoken_r = persian_spoken_number(right_raw)
+        right = str(spoken_r) if spoken_r is not None else None
+    if left is not None and right is not None:
+        return f"{left}:{right}"
+    return None
+
+
+def _extract_peak_flow_insp(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"peak\s*flow\s*inspiratory",
+            r"inspiratory\s*peak\s*flow",
+            r"پیک\s*فلو\s*دمی",
+            r"فلو\s*دمی",
+            r"peak\s*insp(?:iratory)?\s*flow",
+        ),
+        min_v=1,
+        max_v=200,
+    )
+
+
+def _extract_peak_flow_exp(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"peak\s*flow\s*expiratory",
+            r"expiratory\s*peak\s*flow",
+            r"پیک\s*فلو\s*بازدمی",
+            r"فلو\s*بازدمی",
+            r"peak\s*exp(?:iratory)?\s*flow",
+        ),
+        min_v=1,
+        max_v=200,
+    )
+
+
+def _extract_r_inspiratory(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"r\s*inspiratory",
+            r"inspiratory\s*resistance",
+            r"مقاومت\s*دمی",
+            r"آر\s*دمی",
+        ),
+        min_v=0,
+        max_v=100,
+    )
+
+
+def _extract_rcexp(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"rcexp", r"rc\s*exp", r"آر\s*سی\s*اکسپ", r"ثابت\s*زمان\s*بازدم"),
+        min_v=0.1,
+        max_v=20,
+    )
+
+
+def _extract_compliance_static(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"compliance\s*static",
+            r"static\s*compliance",
+            r"cstat",
+            r"کمپلیانس\s*استاتیک",
+            r"کمپلیانس\s*ایستا",
+        ),
+        min_v=1,
+        max_v=200,
+    )
+
+
+def _extract_compliance_dynamic(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"compliance\s*dynamic",
+            r"dynamic\s*compliance",
+            r"cdyn",
+            r"کمپلیانس\s*دینامیک",
+            r"کمپلیانس\s*پویا",
+        ),
+        min_v=1,
+        max_v=200,
+    )
+
+
+def _extract_wob(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"\bwob\b", r"work\s*of\s*breathing", r"کار\s*تنفس", r"دبلیو\s*او\s*بی"),
+        min_v=0,
+        max_v=20,
+    )
+
+
+def _extract_rsbi(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"\brsbi\b", r"آر\s*اس\s*بی\s*آی", r"rapid\s*shallow"),
+        min_v=10,
+        max_v=400,
+    )
+
+
+def _extract_leak(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"\bleak\b", r"نشتی", r"لیک", r"leak\s*%"),
+        min_v=0,
+        max_v=100,
     )
 
 
@@ -852,6 +1237,30 @@ def extract_patient_demographics(transcript: str) -> dict[str, Any]:
     peep_cmh2o = _extract_peep(text)
     fio2_pct = _extract_fio2(text)
 
+    # Measurement tab (additive)
+    rr_total_bpm = _extract_rr_total(text)
+    rr_spontaneous_bpm = _extract_rr_spontaneous(text)
+    vte_ml = _extract_vte(text)
+    vt_ibw_ml_kg = _extract_vt_ibw(text)
+    minute_ventilation_lpm = _extract_minute_ventilation(text)
+    spontaneous_mv_lpm = _extract_spontaneous_mv(text)
+    peak_pressure_cmh2o = _extract_peak_pressure(text)
+    plateau_pressure_cmh2o = _extract_plateau_pressure(text)
+    peep_measured_cmh2o = _extract_peep_measured(text)
+    auto_peep_cmh2o = _extract_auto_peep(text)
+    mean_pressure_cmh2o = _extract_mean_pressure(text)
+    driving_pressure_cmh2o = _extract_driving_pressure(text)
+    ie_ratio = _extract_ie_ratio(text)
+    peak_flow_insp_lpm = _extract_peak_flow_insp(text)
+    peak_flow_exp_lpm = _extract_peak_flow_exp(text)
+    r_inspiratory = _extract_r_inspiratory(text)
+    rcexp_sec = _extract_rcexp(text)
+    compliance_static = _extract_compliance_static(text)
+    compliance_dynamic = _extract_compliance_dynamic(text)
+    wob_jl = _extract_wob(text)
+    rsbi = _extract_rsbi(text)
+    leak_pct = _extract_leak(text)
+
     fields: dict[str, Any] = {
         "gender": gender,
         "age": age,
@@ -886,6 +1295,28 @@ def extract_patient_demographics(transcript: str) -> dict[str, Any]:
         "trigger_sensitivity_lpm": trigger_sensitivity_lpm,
         "peep_cmh2o": peep_cmh2o,
         "fio2_pct": fio2_pct,
+        "rr_total_bpm": rr_total_bpm,
+        "rr_spontaneous_bpm": rr_spontaneous_bpm,
+        "vte_ml": vte_ml,
+        "vt_ibw_ml_kg": vt_ibw_ml_kg,
+        "minute_ventilation_lpm": minute_ventilation_lpm,
+        "spontaneous_mv_lpm": spontaneous_mv_lpm,
+        "peak_pressure_cmh2o": peak_pressure_cmh2o,
+        "plateau_pressure_cmh2o": plateau_pressure_cmh2o,
+        "peep_measured_cmh2o": peep_measured_cmh2o,
+        "auto_peep_cmh2o": auto_peep_cmh2o,
+        "mean_pressure_cmh2o": mean_pressure_cmh2o,
+        "driving_pressure_cmh2o": driving_pressure_cmh2o,
+        "ie_ratio": ie_ratio,
+        "peak_flow_insp_lpm": peak_flow_insp_lpm,
+        "peak_flow_exp_lpm": peak_flow_exp_lpm,
+        "r_inspiratory": r_inspiratory,
+        "rcexp_sec": rcexp_sec,
+        "compliance_static": compliance_static,
+        "compliance_dynamic": compliance_dynamic,
+        "wob_jl": wob_jl,
+        "rsbi": rsbi,
+        "leak_pct": leak_pct,
     }
     found = [k for k, v in fields.items() if v is not None]
     # IBW alone shouldn't count as "heard" — only when gender+height present

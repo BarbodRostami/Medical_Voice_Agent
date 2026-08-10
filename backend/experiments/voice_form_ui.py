@@ -59,6 +59,18 @@ SAMPLE_SCRIPT_VENT = (
     "پی اس ده."
 )
 
+SAMPLE_SCRIPT_MEAS = (
+    "آر آر توتال بیست. "
+    "آر آر اسپانتانیوس هشت. "
+    "وی تی ای چهارصد و پنجاه. "
+    "پیک پرشر بیست و هشت. "
+    "پلاتو بیست و دو. "
+    "پیپ اندازه‌گیری پنج. "
+    "اتو پیپ دو. "
+    "آی ای یک به دو. "
+    "لیک سه درصد."
+)
+
 _PATIENT_KEYS = (
     "gender",
     "age",
@@ -95,6 +107,30 @@ _VENT_KEYS = (
     "trigger_sensitivity_lpm",
     "peep_cmh2o",
     "fio2_pct",
+)
+_MEASURE_KEYS = (
+    "rr_total_bpm",
+    "rr_spontaneous_bpm",
+    "vte_ml",
+    "vt_ibw_ml_kg",
+    "minute_ventilation_lpm",
+    "spontaneous_mv_lpm",
+    "peak_pressure_cmh2o",
+    "plateau_pressure_cmh2o",
+    "peep_measured_cmh2o",
+    "auto_peep_cmh2o",
+    "mean_pressure_cmh2o",
+    "driving_pressure_cmh2o",
+    "ie_ratio",
+    "peak_flow_insp_lpm",
+    "peak_flow_exp_lpm",
+    "r_inspiratory",
+    "rcexp_sec",
+    "compliance_static",
+    "compliance_dynamic",
+    "wob_jl",
+    "rsbi",
+    "leak_pct",
 )
 
 _BOOL_KEYS = ("sedation_active", "recent_surgery", "fever")
@@ -408,15 +444,74 @@ def _clipboard_button(payload: str, *, label: str = "کپی JSON") -> None:
 
 
 def _render_sample_script() -> None:
+    mode = st.radio(
+        "متن نمونه",
+        ("تنظیمات ونتیلاتور", "اندازه‌گیری"),
+        horizontal=True,
+        label_visibility="collapsed",
+        key="sample_mode",
+    )
+    script = SAMPLE_SCRIPT_MEAS if mode == "اندازه‌گیری" else SAMPLE_SCRIPT_VENT
+    title = (
+        "متن نمونه — اندازه‌گیری (بلند بخوانید)"
+        if mode == "اندازه‌گیری"
+        else "متن نمونه — تنظیمات ونتیلاتور (بلند بخوانید)"
+    )
     st.markdown(
         f"""
         <div class="sample-box" dir="rtl">
-          <div class="title">متن نمونه — تنظیمات ونتیلاتور (بلند بخوانید)</div>
-          <div>{SAMPLE_SCRIPT_VENT}</div>
+          <div class="title">{title}</div>
+          <div>{script}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+
+def _render_field_panel(
+    r: dict[str, Any] | None,
+    *,
+    keys: tuple[str, ...],
+    title: str,
+) -> None:
+    data = r or {}
+    found = set(data.get("found") or [])
+    cells: list[str] = []
+    for key in keys:
+        label = FIELD_LABELS_FA.get(key, key)
+        filled = key in found and data.get(key) is not None
+        if filled:
+            val = format_field_value(key, data.get(key))
+            cls = "vent-field filled"
+        else:
+            val = "—"
+            cls = "vent-field empty"
+        cells.append(
+            f'<div class="{cls}"><div class="fl">{label}</div>'
+            f'<div class="fv">{val}</div></div>'
+        )
+    filled_n = sum(1 for k in keys if k in found and data.get(k) is not None)
+    st.markdown(
+        f"""
+        <div class="vent-panel" dir="rtl">
+          <h3>{title}
+            <span style="opacity:0.55;font-size:0.85rem;font-weight:400;">
+              ({filled_n}/{len(keys)} پر شده)
+            </span>
+          </h3>
+          <div class="vent-grid">{"".join(cells)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_vent_settings_form(r: dict[str, Any] | None) -> None:
+    _render_field_panel(r, keys=_VENT_KEYS, title="تنظیمات ونتیلاتور")
+
+
+def _render_measure_form(r: dict[str, Any] | None) -> None:
+    _render_field_panel(r, keys=_MEASURE_KEYS, title="اندازه‌گیری ونتیلاتور")
 
 
 def _render_mic_upload(*, append: bool, key_suffix: str) -> None:
@@ -722,46 +817,9 @@ def _rows_for_keys(r: dict[str, Any], keys: tuple[str, ...]) -> list[str]:
     return rows
 
 
-def _render_vent_settings_form(r: dict[str, Any] | None) -> None:
-    """Always show Settings-tab fields; fill green cells when detected."""
-    data = r or {}
-    found = set(data.get("found") or [])
-    cells: list[str] = []
-    for key in _VENT_KEYS:
-        label = FIELD_LABELS_FA.get(key, key)
-        filled = key in found and data.get(key) is not None
-        if filled:
-            val = format_field_value(key, data.get(key))
-            cls = "vent-field filled"
-        else:
-            val = "—"
-            cls = "vent-field empty"
-        cells.append(
-            f'<div class="{cls}"><div class="fl">{label}</div>'
-            f'<div class="fv">{val}</div></div>'
-        )
-    filled_n = sum(
-        1
-        for k in _VENT_KEYS
-        if k in found and data.get(k) is not None
-    )
-    st.markdown(
-        f"""
-        <div class="vent-panel" dir="rtl">
-          <h3>تنظیمات ونتیلاتور
-            <span style="opacity:0.55;font-size:0.85rem;font-weight:400;">
-              ({filled_n}/{len(_VENT_KEYS)} پر شده)
-            </span>
-          </h3>
-          <div class="vent-grid">{"".join(cells)}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 def _render_result(r: dict[str, Any]) -> None:
     _render_vent_settings_form(r)
+    _render_measure_form(r)
 
     patient_rows = _rows_for_keys(r, _PATIENT_KEYS)
     transcript = (r.get("raw_text") or "").strip()
@@ -791,12 +849,14 @@ def _render_result(r: dict[str, Any]) -> None:
         )
 
     missing = [k for k in (r.get("missing") or []) if k != "ibw_kg"]
-    vent_missing = [k for k in missing if k in _VENT_KEYS]
-    if vent_missing:
-        labels = "، ".join(FIELD_LABELS_FA[k] for k in vent_missing[:10])
-        more = " …" if len(vent_missing) > 10 else ""
+    focus_missing = [k for k in missing if k in _MEASURE_KEYS] or [
+        k for k in missing if k in _VENT_KEYS
+    ]
+    if focus_missing:
+        labels = "، ".join(FIELD_LABELS_FA[k] for k in focus_missing[:10])
+        more = " …" if len(focus_missing) > 10 else ""
         st.markdown(
-            f'<div class="missing-box">هنوز از تنظیمات نگفتید: {labels}{more}</div>',
+            f'<div class="missing-box">هنوز نگفتید: {labels}{more}</div>',
             unsafe_allow_html=True,
         )
 
@@ -877,6 +937,7 @@ elif phase == "processing":
 elif phase == "append":
     _render_sample_script()
     _render_vent_settings_form(st.session_state.get("result"))
+    _render_measure_form(st.session_state.get("result"))
     st.markdown(
         '<p class="listening-hint">ادامه بدهید — فیلدهای قبلی نگه داشته می‌شوند</p>',
         unsafe_allow_html=True,
@@ -886,11 +947,12 @@ elif phase == "append":
         st.session_state["phase"] = "result"
         st.rerun()
     if st.session_state.get("error"):
-        st.caption(st.session_state["error"])
+        st.error(st.session_state["error"])
 
 else:
     _render_sample_script()
     _render_vent_settings_form(st.session_state.get("result"))
+    _render_measure_form(st.session_state.get("result"))
     _render_mic_upload(append=False, key_suffix="main")
     if st.session_state.get("error"):
-        st.caption(st.session_state["error"])
+        st.error(st.session_state["error"])

@@ -166,6 +166,27 @@ class FormExtractTests(unittest.TestCase):
         self.assertIsNone(r["ventilator_mode"])
         self.assertIsNone(r["peep_cmh2o"])
         self.assertIsNone(r["fio2_pct"])
+        self.assertIsNone(r["rr_total_bpm"])
+        self.assertIsNone(r["peak_pressure_cmh2o"])
+
+    def test_measurement_fields(self) -> None:
+        r = extract_patient_demographics(
+            "آر آر توتال ۲۰ آر آر اسپانتانیوس ۸ وی تی ای ۴۵۰ "
+            "پیک پرشر ۲۸ پلاتو ۲۲ پیپ اندازه‌گیری ۵ اتو پیپ ۲ "
+            "آی ای ۱ به ۲ لیک ۳ درصد RSBI ۱۱۰"
+        )
+        self.assertEqual(r["rr_total_bpm"], 20)
+        self.assertEqual(r["rr_spontaneous_bpm"], 8)
+        self.assertEqual(r["vte_ml"], 450)
+        self.assertEqual(r["peak_pressure_cmh2o"], 28.0)
+        self.assertEqual(r["plateau_pressure_cmh2o"], 22.0)
+        self.assertEqual(r["peep_measured_cmh2o"], 5.0)
+        self.assertEqual(r["auto_peep_cmh2o"], 2.0)
+        self.assertEqual(r["ie_ratio"], "1:2")
+        self.assertEqual(r["leak_pct"], 3.0)
+        self.assertEqual(r["rsbi"], 110.0)
+        # Settings peep set should stay empty when only measured spoken
+        self.assertIsNone(r["peep_cmh2o"])
 
 
 if __name__ == "__main__":

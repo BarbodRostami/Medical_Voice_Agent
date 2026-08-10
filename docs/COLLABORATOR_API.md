@@ -163,6 +163,11 @@ JSON body example:
     `vt_set_ml`, `rr_set_bpm`, `pi_cmh2o`, `ps_cmh2o`, `p_hi_cmh2o`, `p_lo_cmh2o`,
     `t_hi_sec`, `t_lo_sec`, `ti_max_sec`, `cycle_criteria_pct`, `rise_time_sec`,
     `trigger_sensitivity_lpm`
+  - Measurement tab additive keys: `rr_total_bpm`, `rr_spontaneous_bpm`, `vte_ml`,
+    `peak_pressure_cmh2o`, `plateau_pressure_cmh2o`, `peep_measured_cmh2o`,
+    `auto_peep_cmh2o`, `mean_pressure_cmh2o`, `driving_pressure_cmh2o`, `ie_ratio`,
+    `minute_ventilation_lpm`, `compliance_static`, `compliance_dynamic`, `rsbi`,
+    `leak_pct`, …
   - `ventilator_mode` values match HakimAI dropdown:
     `VCV` | `PCV` | `SIMV-V` | `SIMV-P` | `PSV/CPAP` | `APRV` | `PRVC`
   - Full key list is always in `fields.schema_keys`
