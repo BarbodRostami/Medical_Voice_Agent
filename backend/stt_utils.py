@@ -32,13 +32,16 @@ WHISPER_MEDICAL_PROMPT_FA = (
 
 # Experiment: voice → HakimAI-like patient tab. Does not affect HakimAI API.
 WHISPER_FORM_PROMPT_FA = (
-    "فرم بیمار ICU به فارسی. "
+    "فرم بیمار ICU، تنظیمات و اندازه‌گیری ونتیلاتور به فارسی. "
     "جنس مرد یا زن، سن ساله، قد سانتی‌متر، وزن کیلوگرم. "
-    "ونتیلاتور چند روز، لوله ETT یا تراک، اندیکاسیون الکتیو یا اورژانس، RASS. "
-    "تشخیص اصلی، دسته مثل ARDS یا پنومونی، تب، جراحی اخیر، sedation، "
-    "شدت ترشحات، خلاصه CXR. "
-    "مثال: بیمار خانم سی و دو ساله قد صد و شصت وزن هفتاد، سه روز ونتیلاتور، "
-    "لوله ETT، تشخیص ARDS، تب دارد."
+    "مود ونتیلاتور: VCV PCV SIMV-V SIMV-P PSV CPAP APRV PRVC. "
+    "PEEP set، FiO2، VT set، RR set، Pi، PS. "
+    "اندازه‌گیری: RR total، RR spontaneous، VTe، Peak pressure، Plateau، "
+    "PEEP measured، Auto-PEEP، Mean pressure، Driving pressure، I:E، "
+    "Minute ventilation، Compliance، RSBI، Leak. "
+    "مثال تنظیمات: مود VCV، PEEP پنج، FiO2 چهل، VT پانصد. "
+    "مثال اندازه‌گیری: آر آر توتال بیست، وی تی ای چهارصد و پنجاه، "
+    "پیک پرشر بیست و هشت، پلاتو بیست و دو، پیپ اندازه‌گیری پنج، لیک دو."
 )
 
 # Conservative fixes for frequent short-utterance Whisper FA mistakes.
@@ -51,7 +54,7 @@ _TRANSCRIPT_PHRASE_FIXES: tuple[tuple[str, str], ...] = (
     ("ایک ", "یک "),
 )
 
-# Extra STT cleanup for demographics form experiment only.
+# Extra STT cleanup for demographics form (cases + experiment).
 _FORM_TRANSCRIPT_FIXES: tuple[tuple[str, str], ...] = (
     ("سیودو", "سی و دو"),
     ("سیو دو", "سی و دو"),
@@ -63,6 +66,17 @@ _FORM_TRANSCRIPT_FIXES: tuple[tuple[str, str], ...] = (
     ("خانوم", "خانم"),
     ("سانتیمتر", "سانتی متر"),
     ("سانتی‌متر", "سانتی متر"),
+    # Common Whisper/GapGPT garbling on height/age phrases
+    ("سنتی میت", "سانتی متر"),
+    ("سنتی‌میت", "سانتی متر"),
+    ("سنتی متر", "سانتی متر"),
+    ("سانتی میتر", "سانتی متر"),
+    ("سانتی میت", "سانتی متر"),
+    ("حفتاد", "هفتاد"),
+    ("حضتاد", "هفتاد"),
+    ("هفتادو", "هفتاد و"),
+    ("سد و", "صد و"),
+    (" سد ", " صد "),
 )
 
 _MIME_TO_EXT: dict[str, str] = {
@@ -227,7 +241,7 @@ def transcribe_medical_speech(model: Any, audio_path: str) -> str:
 
 
 def transcribe_form_demographics_speech(model: Any, audio_path: str) -> str:
-    """STT biased for patient form fields (gender / age / height). Experiment only."""
+    """STT biased for patient form fields (gender / age / height)."""
     wav_path, cleanup = normalize_audio_for_stt(audio_path)
     try:
         # Soft VAD: short form utterances are often clipped by aggressive VAD.
@@ -350,7 +364,7 @@ def transcribe_form_demographics_audio(
     audio_path: str,
     local_model_getter: Callable[[], Any],
 ) -> str:
-    """Experiment STT for patient-form fill (HakimAI medical STT unchanged)."""
+    """Form-fill STT (used by /api/cases voice path + voice-form experiment)."""
     provider = stt_provider()
     if provider == "openai":
         cfg = openai_compatible_config()
