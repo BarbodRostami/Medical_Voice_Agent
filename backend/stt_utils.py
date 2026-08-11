@@ -32,16 +32,18 @@ WHISPER_MEDICAL_PROMPT_FA = (
 
 # Experiment: voice → HakimAI-like patient tab. Does not affect HakimAI API.
 WHISPER_FORM_PROMPT_FA = (
-    "فرم بیمار ICU، تنظیمات و اندازه‌گیری ونتیلاتور به فارسی. "
+    "فرم بیمار ICU، تنظیمات و اندازه‌گیری ونتیلاتور و ABG به فارسی. "
     "جنس مرد یا زن، سن ساله، قد سانتی‌متر، وزن کیلوگرم. "
     "مود ونتیلاتور: VCV PCV SIMV-V SIMV-P PSV CPAP APRV PRVC. "
     "PEEP set، FiO2، VT set، RR set، Pi، PS. "
     "اندازه‌گیری: RR total، RR spontaneous، VTe، Peak pressure، Plateau، "
     "PEEP measured، Auto-PEEP، Mean pressure، Driving pressure، I:E، "
     "Minute ventilation، Compliance، RSBI، Leak. "
+    "ABG: pH، PaCO2، PaO2، SaO2، HCO3، Base Excess، P/F ratio. "
     "مثال تنظیمات: مود VCV، PEEP پنج، FiO2 چهل، VT پانصد. "
     "مثال اندازه‌گیری: آر آر توتال بیست، وی تی ای چهارصد و پنجاه، "
-    "پیک پرشر بیست و هشت، پلاتو بیست و دو، پیپ اندازه‌گیری پنج، لیک دو."
+    "پیک پرشر بیست و هشت، پلاتو بیست و دو، پیپ اندازه‌گیری پنج، لیک دو. "
+    "مثال ABG: پی اچ هفت و سی و پنج، پی ای او دو هشتاد، فی او دو چهل."
 )
 
 # Conservative fixes for frequent short-utterance Whisper FA mistakes.

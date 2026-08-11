@@ -71,6 +71,16 @@ SAMPLE_SCRIPT_MEAS = (
     "لیک سه درصد."
 )
 
+SAMPLE_SCRIPT_ABG = (
+    "پی اچ هفت و سی و پنج. "
+    "پی ای سی او دو چهل. "
+    "پی ای او دو هشتاد. "
+    "اس ای او دو نود و پنج. "
+    "بیکربنات بیست و چهار. "
+    "بیس اکسس منفی دو. "
+    "فی او دو چهل درصد."
+)
+
 _PATIENT_KEYS = (
     "gender",
     "age",
@@ -131,6 +141,15 @@ _MEASURE_KEYS = (
     "wob_jl",
     "rsbi",
     "leak_pct",
+)
+_ABG_KEYS = (
+    "ph",
+    "paco2_mmhg",
+    "pao2_mmhg",
+    "sao2_pct",
+    "hco3_meq_l",
+    "base_excess_meq_l",
+    "pf_ratio",
 )
 
 _BOOL_KEYS = ("sedation_active", "recent_surgery", "fever")
@@ -446,17 +465,20 @@ def _clipboard_button(payload: str, *, label: str = "کپی JSON") -> None:
 def _render_sample_script() -> None:
     mode = st.radio(
         "متن نمونه",
-        ("تنظیمات ونتیلاتور", "اندازه‌گیری"),
+        ("تنظیمات ونتیلاتور", "اندازه‌گیری", "ABG"),
         horizontal=True,
         label_visibility="collapsed",
         key="sample_mode",
     )
-    script = SAMPLE_SCRIPT_MEAS if mode == "اندازه‌گیری" else SAMPLE_SCRIPT_VENT
-    title = (
-        "متن نمونه — اندازه‌گیری (بلند بخوانید)"
-        if mode == "اندازه‌گیری"
-        else "متن نمونه — تنظیمات ونتیلاتور (بلند بخوانید)"
-    )
+    if mode == "اندازه‌گیری":
+        script = SAMPLE_SCRIPT_MEAS
+        title = "متن نمونه — اندازه‌گیری (بلند بخوانید)"
+    elif mode == "ABG":
+        script = SAMPLE_SCRIPT_ABG
+        title = "متن نمونه — ABG (بلند بخوانید؛ FiO2 برای P/F)"
+    else:
+        script = SAMPLE_SCRIPT_VENT
+        title = "متن نمونه — تنظیمات ونتیلاتور (بلند بخوانید)"
     st.markdown(
         f"""
         <div class="sample-box" dir="rtl">
@@ -512,6 +534,10 @@ def _render_vent_settings_form(r: dict[str, Any] | None) -> None:
 
 def _render_measure_form(r: dict[str, Any] | None) -> None:
     _render_field_panel(r, keys=_MEASURE_KEYS, title="اندازه‌گیری ونتیلاتور")
+
+
+def _render_abg_form(r: dict[str, Any] | None) -> None:
+    _render_field_panel(r, keys=_ABG_KEYS, title="ABG گاز خون شریانی")
 
 
 def _render_mic_upload(*, append: bool, key_suffix: str) -> None:
@@ -820,6 +846,7 @@ def _rows_for_keys(r: dict[str, Any], keys: tuple[str, ...]) -> list[str]:
 def _render_result(r: dict[str, Any]) -> None:
     _render_vent_settings_form(r)
     _render_measure_form(r)
+    _render_abg_form(r)
 
     patient_rows = _rows_for_keys(r, _PATIENT_KEYS)
     transcript = (r.get("raw_text") or "").strip()
@@ -849,9 +876,11 @@ def _render_result(r: dict[str, Any]) -> None:
         )
 
     missing = [k for k in (r.get("missing") or []) if k != "ibw_kg"]
-    focus_missing = [k for k in missing if k in _MEASURE_KEYS] or [
-        k for k in missing if k in _VENT_KEYS
-    ]
+    focus_missing = (
+        [k for k in missing if k in _ABG_KEYS]
+        or [k for k in missing if k in _MEASURE_KEYS]
+        or [k for k in missing if k in _VENT_KEYS]
+    )
     if focus_missing:
         labels = "، ".join(FIELD_LABELS_FA[k] for k in focus_missing[:10])
         more = " …" if len(focus_missing) > 10 else ""

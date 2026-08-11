@@ -168,6 +168,10 @@ JSON body example:
     `auto_peep_cmh2o`, `mean_pressure_cmh2o`, `driving_pressure_cmh2o`, `ie_ratio`,
     `minute_ventilation_lpm`, `compliance_static`, `compliance_dynamic`, `rsbi`,
     `leak_pct`, …
+  - ABG tab additive keys: `ph`, `paco2_mmhg`, `pao2_mmhg`, `sao2_pct`,
+    `hco3_meq_l`, `base_excess_meq_l`, `pf_ratio` (computed = PaO2 / FiO2 fraction)
+  - Computed helpers (same idea as `ibw_kg`): `vt_ibw_ml_kg` from VTe+IBW;
+    `pf_ratio` from PaO2 + `fio2_pct`
   - `ventilator_mode` values match HakimAI dropdown:
     `VCV` | `PCV` | `SIMV-V` | `SIMV-P` | `PSV/CPAP` | `APRV` | `PRVC`
   - Full key list is always in `fields.schema_keys`

@@ -1,7 +1,7 @@
-"""Extract HakimAI form fields from Persian speech (patient + settings + measurement).
+"""Extract HakimAI form fields from Persian speech (patient + settings + measurement + ABG).
 
 Used by voice-form experiment UI and collaborator ``/api/cases`` → ``fields``.
-Patient and Settings keys stay stable; Measurement-tab keys are additive.
+Patient / Settings / Measurement keys stay stable; ABG-tab keys are additive.
 """
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ FIELD_LABELS_FA: dict[str, str] = {
     "rr_total_bpm": "RR total (bpm)",
     "rr_spontaneous_bpm": "RR spontaneous (bpm)",
     "vte_ml": "VTe (mL)",
-    "vt_ibw_ml_kg": "VT/IBW (mL/kg)",
+    "vt_ibw_ml_kg": "VT/IBW (محاسباتی، mL/kg)",
     "minute_ventilation_lpm": "Minute ventilation (L/min)",
     "spontaneous_mv_lpm": "Spontaneous MV (L/min)",
     "peak_pressure_cmh2o": "Peak pressure (cmH2O)",
@@ -72,6 +72,14 @@ FIELD_LABELS_FA: dict[str, str] = {
     "wob_jl": "WOB (J/L)",
     "rsbi": "RSBI",
     "leak_pct": "Leak (%)",
+    # --- ABG tab (additive) ---
+    "ph": "pH",
+    "paco2_mmhg": "PaCO2 (mmHg)",
+    "pao2_mmhg": "PaO2 (mmHg)",
+    "sao2_pct": "SaO2 (%)",
+    "hco3_meq_l": "HCO3 (mEq/L)",
+    "base_excess_meq_l": "Base Excess (mEq/L)",
+    "pf_ratio": "P/F ratio (محاسباتی)",
 }
 
 # HakimAI Settings-tab mode dropdown values (exact strings for UI mapping)
@@ -259,6 +267,43 @@ def compute_ibw_kg(gender: Gender | None, height_cm: int | None) -> float | None
     else:
         ibw = 45.5 + 2.3 * (inches - 60.0)
     return round(max(ibw, 0.0), 1)
+
+
+def compute_vt_ibw_ml_kg(
+    vte_ml: int | float | None,
+    ibw_kg: float | None,
+) -> float | None:
+    """VT/IBW (mL/kg) from expired tidal volume and IBW."""
+    if vte_ml is None or ibw_kg is None:
+        return None
+    try:
+        vte = float(vte_ml)
+        ibw = float(ibw_kg)
+    except (TypeError, ValueError):
+        return None
+    if vte <= 0 or ibw <= 0:
+        return None
+    return round(vte / ibw, 1)
+
+
+def compute_pf_ratio(
+    pao2_mmhg: int | float | None,
+    fio2_pct: int | float | None,
+) -> float | None:
+    """P/F ratio = PaO2 / FiO2 (FiO2 as fraction; ``fio2_pct`` may be 21–100 or 0.21–1)."""
+    if pao2_mmhg is None or fio2_pct is None:
+        return None
+    try:
+        pao2 = float(pao2_mmhg)
+        fio2 = float(fio2_pct)
+    except (TypeError, ValueError):
+        return None
+    if pao2 <= 0 or fio2 <= 0:
+        return None
+    frac = fio2 if fio2 <= 1.0 else fio2 / 100.0
+    if frac <= 0:
+        return None
+    return round(pao2 / frac, 1)
 
 
 def _extract_gender(text: str) -> Gender | None:
@@ -1119,6 +1164,169 @@ def _extract_leak(text: str) -> float | None:
     )
 
 
+def _extract_ph(text: str) -> float | None:
+    """pH: digits (7.35) or spoken medical style (هفت و سی و پنج / هفت ممیز سی و پنج)."""
+    m = re.search(
+        r"(?:\bph\b|پی\s*اچ|پی‌اچ)\s*[:\-]?\s*(\d+(?:[./٫]\d+)?)",
+        text,
+        re.I,
+    )
+    if m:
+        val = float(m.group(1).replace("٫", ".").replace("/", "."))
+        if 6.5 <= val <= 8.0:
+            return round(val, 2)
+    m = re.search(
+        r"(?:\bph\b|پی\s*اچ|پی‌اچ)\s*[:\-]?\s*"
+        r"((?:[^\s]+(?:\s+و\s+[^\s]+){0,4}))",
+        text,
+        re.I,
+    )
+    if not m:
+        return None
+    phrase = m.group(1).strip()
+    phrase = re.sub(r"\s*(?:است|بود|می‌باشد).*$", "", phrase).strip()
+    if "ممیز" in phrase:
+        left, _, right = phrase.partition("ممیز")
+        whole = persian_spoken_number(left.strip())
+        frac = persian_spoken_number(right.strip())
+        if whole is not None and frac is not None and 0 <= frac <= 99:
+            val = whole + frac / (10 ** len(str(frac)))
+            if 6.5 <= val <= 8.0:
+                return round(val, 2)
+        return None
+    parts = [p for p in re.split(r"\s+و\s+|\s+", phrase) if p]
+    if not parts:
+        return None
+    nums: list[int] = []
+    for p in parts:
+        if p.isdigit():
+            nums.append(int(p))
+        elif p in _ALL_WORDS:
+            nums.append(_ALL_WORDS[p])
+        else:
+            return None
+    if len(nums) >= 2 and 6 <= nums[0] <= 8:
+        frac_total = sum(nums[1:])
+        if 0 <= frac_total <= 99:
+            val = nums[0] + frac_total / 100.0
+            if 6.5 <= val <= 8.0:
+                return round(val, 2)
+    if len(nums) == 1 and 6.5 <= nums[0] <= 8.0:
+        return float(nums[0])
+    return None
+
+
+def _extract_paco2(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"paco2",
+            r"pa\s*co2",
+            r"پی\s*ای\s*سی\s*او\s*دو",
+            r"پی\s*آ\s*سی\s*او\s*دو",
+            r"دی\s*اکسید\s*کربن\s*شریانی",
+        ),
+        min_v=10,
+        max_v=150,
+    )
+
+
+def _extract_pao2(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"pao2",
+            r"pa\s*o2",
+            r"پی\s*ای\s*او\s*دو",
+            r"پی\s*آ\s*او\s*دو",
+            r"اکسیژن\s*شریانی",
+        ),
+        min_v=20,
+        max_v=600,
+    )
+
+
+def _extract_sao2(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"sao2",
+            r"sa\s*o2",
+            r"اس\s*ای\s*او\s*دو",
+            r"اشباع\s*شریانی",
+        ),
+        min_v=40,
+        max_v=100,
+    )
+
+
+def _extract_hco3(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"hco3",
+            r"بی\s*کربنات",
+            r"بیکربنات",
+            r"اچ\s*سی\s*او\s*سه",
+        ),
+        min_v=5,
+        max_v=50,
+    )
+
+
+def _extract_base_excess(text: str) -> float | None:
+    label_re = (
+        r"base\s*excess|\bbe\b|بیس\s*اکسس|بیس\s*اکسز|بیس‌اکسس|"
+        r"اضافه\s*باز|بیس\s*ایکسس"
+    )
+    m = re.search(
+        rf"(?:{label_re})\s*[:\-]?\s*(-?\d+(?:\.\d+)?)",
+        text,
+        re.I,
+    )
+    if m:
+        val = float(m.group(1))
+        if -30 <= val <= 30:
+            return val
+    # Spoken: بیس اکسس منفی دو / بیس اکسس دو
+    m = re.search(
+        rf"(?:{label_re})\s*[:\-]?\s*(منفی\s+)?"
+        r"((?:[^\s]+(?:\s+و\s+[^\s]+){0,2}|\d+(?:\.\d+)?))",
+        text,
+        re.I,
+    )
+    if m:
+        negative = bool(m.group(1))
+        raw = m.group(2).strip()
+        if re.fullmatch(r"\d+(?:\.\d+)?", raw):
+            val = float(raw)
+        else:
+            spoken = persian_spoken_number(raw)
+            val = float(spoken) if spoken is not None else None
+        if val is not None:
+            if negative:
+                val = -abs(val)
+            if -30 <= val <= 30:
+                return val
+    return None
+
+
+def _extract_pf_ratio(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"p\s*/\s*f",
+            r"pf\s*ratio",
+            r"p\s*f\s*ratio",
+            r"پی\s*اف",
+            r"نسبت\s*پی\s*اف",
+            r"پی\s*به\s*اف",
+        ),
+        min_v=40,
+        max_v=600,
+    )
+
+
 def _extract_after_keyword(text: str, keywords: tuple[str, ...], max_len: int = 120) -> str | None:
     for kw in keywords:
         m = re.search(
@@ -1167,6 +1375,16 @@ def format_field_value(key: str, value: Any) -> str:
         return f"{value} cmH2O"
     if key == "fio2_pct":
         return f"{value}%"
+    if key == "paco2_mmhg":
+        return f"{value} mmHg"
+    if key == "pao2_mmhg":
+        return f"{value} mmHg"
+    if key == "sao2_pct":
+        return f"{value}%"
+    if key == "hco3_meq_l":
+        return f"{value} mEq/L"
+    if key == "base_excess_meq_l":
+        return f"{value} mEq/L"
     if key == "vt_set_ml":
         return f"{value} ml"
     if key == "rr_set_bpm":
@@ -1175,10 +1393,10 @@ def format_field_value(key: str, value: Any) -> str:
 
 
 def extract_patient_demographics(transcript: str) -> dict[str, Any]:
-    """Parse HakimAI form fields (patient tab + ventilator settings) from speech text.
+    """Parse HakimAI form fields (patient + vent settings + measurement + ABG) from speech.
 
     Backward-compatible name; returns flat keys + found/missing lists.
-    Existing patient keys are unchanged; vent settings are additive.
+    Existing patient/settings/measurement keys are unchanged; ABG keys are additive.
     """
     raw = (transcript or "").strip()
     text = normalize_persian_text(raw)
@@ -1241,7 +1459,10 @@ def extract_patient_demographics(transcript: str) -> dict[str, Any]:
     rr_total_bpm = _extract_rr_total(text)
     rr_spontaneous_bpm = _extract_rr_spontaneous(text)
     vte_ml = _extract_vte(text)
-    vt_ibw_ml_kg = _extract_vt_ibw(text)
+    # Like IBW: compute when inputs exist; fall back to spoken value otherwise.
+    vt_ibw_ml_kg = compute_vt_ibw_ml_kg(vte_ml, ibw_kg)
+    if vt_ibw_ml_kg is None:
+        vt_ibw_ml_kg = _extract_vt_ibw(text)
     minute_ventilation_lpm = _extract_minute_ventilation(text)
     spontaneous_mv_lpm = _extract_spontaneous_mv(text)
     peak_pressure_cmh2o = _extract_peak_pressure(text)
@@ -1260,6 +1481,17 @@ def extract_patient_demographics(transcript: str) -> dict[str, Any]:
     wob_jl = _extract_wob(text)
     rsbi = _extract_rsbi(text)
     leak_pct = _extract_leak(text)
+
+    # ABG tab (additive)
+    ph = _extract_ph(text)
+    paco2_mmhg = _extract_paco2(text)
+    pao2_mmhg = _extract_pao2(text)
+    sao2_pct = _extract_sao2(text)
+    hco3_meq_l = _extract_hco3(text)
+    base_excess_meq_l = _extract_base_excess(text)
+    pf_ratio = compute_pf_ratio(pao2_mmhg, fio2_pct)
+    if pf_ratio is None:
+        pf_ratio = _extract_pf_ratio(text)
 
     fields: dict[str, Any] = {
         "gender": gender,
@@ -1317,6 +1549,13 @@ def extract_patient_demographics(transcript: str) -> dict[str, Any]:
         "wob_jl": wob_jl,
         "rsbi": rsbi,
         "leak_pct": leak_pct,
+        "ph": ph,
+        "paco2_mmhg": paco2_mmhg,
+        "pao2_mmhg": pao2_mmhg,
+        "sao2_pct": sao2_pct,
+        "hco3_meq_l": hco3_meq_l,
+        "base_excess_meq_l": base_excess_meq_l,
+        "pf_ratio": pf_ratio,
     }
     found = [k for k, v in fields.items() if v is not None]
     # IBW alone shouldn't count as "heard" — only when gender+height present
@@ -1334,7 +1573,7 @@ def extract_patient_demographics(transcript: str) -> dict[str, Any]:
 
 
 def finalize_patient_fields(fields: dict[str, Any], *, raw_text: str = "") -> dict[str, Any]:
-    """Recompute IBW / found / missing after merge or manual edit."""
+    """Recompute IBW / VT/IBW / P/F / found / missing after merge or manual edit."""
     gender = fields.get("gender")
     height_cm = fields.get("height_cm")
     height_int: int | None
@@ -1348,10 +1587,20 @@ def finalize_patient_fields(fields: dict[str, Any], *, raw_text: str = "") -> di
     )
     out: dict[str, Any] = {k: fields.get(k) for k in FIELD_LABELS_FA}
     out["ibw_kg"] = ibw
+    computed_vt_ibw = compute_vt_ibw_ml_kg(out.get("vte_ml"), ibw)
+    if computed_vt_ibw is not None:
+        out["vt_ibw_ml_kg"] = computed_vt_ibw
+    computed_pf = compute_pf_ratio(out.get("pao2_mmhg"), out.get("fio2_pct"))
+    if computed_pf is not None:
+        out["pf_ratio"] = computed_pf
     found = [k for k, v in out.items() if v is not None]
     if "ibw_kg" in found and (out.get("gender") is None or out.get("height_cm") is None):
         found = [k for k in found if k != "ibw_kg"]
         out["ibw_kg"] = None
+        # IBW cleared → drop derived VT/IBW unless it was only spoken without VTe
+        if computed_vt_ibw is not None:
+            out["vt_ibw_ml_kg"] = None
+            found = [k for k in found if k != "vt_ibw_ml_kg"]
     missing = [k for k in FIELD_LABELS_FA if out.get(k) is None]
     return {
         **out,

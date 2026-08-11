@@ -6,6 +6,8 @@ import unittest
 from backend.experiments.form_extract import (
     FIELD_LABELS_FA,
     compute_ibw_kg,
+    compute_pf_ratio,
+    compute_vt_ibw_ml_kg,
     confirmation_speech_fa,
     export_fields_payload,
     extract_patient_demographics,
@@ -187,6 +189,66 @@ class FormExtractTests(unittest.TestCase):
         self.assertEqual(r["rsbi"], 110.0)
         # Settings peep set should stay empty when only measured spoken
         self.assertIsNone(r["peep_cmh2o"])
+
+    def test_vt_ibw_computed_from_vte_and_ibw(self) -> None:
+        r = extract_patient_demographics(
+            "بیمار آقای قد ۱۷۵ سانتی‌متر وی تی ای ۴۵۰"
+        )
+        self.assertEqual(r["vte_ml"], 450)
+        self.assertIsNotNone(r["ibw_kg"])
+        expected = compute_vt_ibw_ml_kg(450, r["ibw_kg"])
+        self.assertEqual(r["vt_ibw_ml_kg"], expected)
+        self.assertIn("vt_ibw_ml_kg", r["found"])
+
+    def test_vt_ibw_spoken_wins_without_vte(self) -> None:
+        r = extract_patient_demographics("VT/IBW 6.5")
+        self.assertEqual(r["vt_ibw_ml_kg"], 6.5)
+        self.assertIsNone(r["vte_ml"])
+        self.assertIsNone(r["ibw_kg"])
+
+    def test_vt_ibw_recomputed_on_merge(self) -> None:
+        base = extract_patient_demographics("بیمار آقای قد ۱۷۵ سانتی‌متر")
+        incoming = extract_patient_demographics("وی تی ای ۴۵۰")
+        merged = merge_patient_extractions(base, incoming)
+        self.assertEqual(merged["vte_ml"], 450)
+        self.assertEqual(
+            merged["vt_ibw_ml_kg"],
+            compute_vt_ibw_ml_kg(450, merged["ibw_kg"]),
+        )
+
+    def test_compute_vt_ibw_helper(self) -> None:
+        self.assertEqual(compute_vt_ibw_ml_kg(450, 70.0), 6.4)
+        self.assertIsNone(compute_vt_ibw_ml_kg(None, 70.0))
+        self.assertIsNone(compute_vt_ibw_ml_kg(450, None))
+        self.assertIsNone(compute_vt_ibw_ml_kg(450, 0))
+
+    def test_abg_fields_and_pf_ratio(self) -> None:
+        r = extract_patient_demographics(
+            "پی اچ ۷٫۳۵ پی ای سی او دو ۴۰ پی ای او دو ۸۰ "
+            "اس ای او دو ۹۵ بیکربنات ۲۴ بیس اکسس منفی ۲ "
+            "فی او دو ۴۰ درصد"
+        )
+        self.assertEqual(r["ph"], 7.35)
+        self.assertEqual(r["paco2_mmhg"], 40.0)
+        self.assertEqual(r["pao2_mmhg"], 80.0)
+        self.assertEqual(r["sao2_pct"], 95.0)
+        self.assertEqual(r["hco3_meq_l"], 24.0)
+        self.assertEqual(r["base_excess_meq_l"], -2.0)
+        self.assertEqual(r["fio2_pct"], 40.0)
+        self.assertEqual(r["pf_ratio"], compute_pf_ratio(80.0, 40.0))
+        self.assertEqual(r["pf_ratio"], 200.0)
+
+    def test_pf_ratio_recomputed_on_merge(self) -> None:
+        base = extract_patient_demographics("فی او دو پنجاه درصد")
+        incoming = extract_patient_demographics("پی ای او دو ۱۰۰")
+        merged = merge_patient_extractions(base, incoming)
+        self.assertEqual(merged["pao2_mmhg"], 100.0)
+        self.assertEqual(merged["fio2_pct"], 50.0)
+        self.assertEqual(merged["pf_ratio"], 200.0)
+
+    def test_ph_spoken_medical_style(self) -> None:
+        r = extract_patient_demographics("پی اچ هفت و سی و پنج")
+        self.assertEqual(r["ph"], 7.35)
 
 
 if __name__ == "__main__":
