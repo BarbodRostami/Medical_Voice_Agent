@@ -170,8 +170,11 @@ JSON body example:
     `leak_pct`, …
   - ABG tab additive keys: `ph`, `paco2_mmhg`, `pao2_mmhg`, `sao2_pct`,
     `hco3_meq_l`, `base_excess_meq_l`, `pf_ratio` (computed = PaO2 / FiO2 fraction)
+  - Hemodynamics tab additive keys: `sbp_mmhg`, `dbp_mmhg`, `map_mmhg`
+    (computed = DBP + (SBP − DBP) / 3), `hr_bpm`, `temperature_c`,
+    `urine_output_ml_hr`, `io_balance_24h_ml`, `vasopressor_active`
   - Computed helpers (same idea as `ibw_kg`): `vt_ibw_ml_kg` from VTe+IBW;
-    `pf_ratio` from PaO2 + `fio2_pct`
+    `pf_ratio` from PaO2 + `fio2_pct`; `map_mmhg` from SBP+DBP
   - `ventilator_mode` values match HakimAI dropdown:
     `VCV` | `PCV` | `SIMV-V` | `SIMV-P` | `PSV/CPAP` | `APRV` | `PRVC`
   - Full key list is always in `fields.schema_keys`

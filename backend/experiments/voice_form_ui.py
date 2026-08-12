@@ -81,6 +81,15 @@ SAMPLE_SCRIPT_ABG = (
     "فی او دو چهل درصد."
 )
 
+SAMPLE_SCRIPT_HEMO = (
+    "فشار خون صد و بیست روی هشتاد. "
+    "اچ آر نود. "
+    "دما سی و هفت. "
+    "خروجی ادرار پنجاه. "
+    "بالانس مایعات مثبت پانصد. "
+    "وازوپرسور ندارد."
+)
+
 _PATIENT_KEYS = (
     "gender",
     "age",
@@ -151,8 +160,18 @@ _ABG_KEYS = (
     "base_excess_meq_l",
     "pf_ratio",
 )
+_HEMO_KEYS = (
+    "sbp_mmhg",
+    "dbp_mmhg",
+    "map_mmhg",
+    "hr_bpm",
+    "temperature_c",
+    "urine_output_ml_hr",
+    "io_balance_24h_ml",
+    "vasopressor_active",
+)
 
-_BOOL_KEYS = ("sedation_active", "recent_surgery", "fever")
+_BOOL_KEYS = ("sedation_active", "recent_surgery", "fever", "vasopressor_active")
 _INT_KEYS = ("age", "height_cm", "rass", "vt_set_ml", "rr_set_bpm")
 _FLOAT_KEYS = (
     "weight_kg",
@@ -465,7 +484,7 @@ def _clipboard_button(payload: str, *, label: str = "کپی JSON") -> None:
 def _render_sample_script() -> None:
     mode = st.radio(
         "متن نمونه",
-        ("تنظیمات ونتیلاتور", "اندازه‌گیری", "ABG"),
+        ("تنظیمات ونتیلاتور", "اندازه‌گیری", "ABG", "همودینامیک"),
         horizontal=True,
         label_visibility="collapsed",
         key="sample_mode",
@@ -476,6 +495,9 @@ def _render_sample_script() -> None:
     elif mode == "ABG":
         script = SAMPLE_SCRIPT_ABG
         title = "متن نمونه — ABG (بلند بخوانید؛ FiO2 برای P/F)"
+    elif mode == "همودینامیک":
+        script = SAMPLE_SCRIPT_HEMO
+        title = "متن نمونه — همودینامیک (بلند بخوانید؛ MAP از SBP/DBP)"
     else:
         script = SAMPLE_SCRIPT_VENT
         title = "متن نمونه — تنظیمات ونتیلاتور (بلند بخوانید)"
@@ -538,6 +560,10 @@ def _render_measure_form(r: dict[str, Any] | None) -> None:
 
 def _render_abg_form(r: dict[str, Any] | None) -> None:
     _render_field_panel(r, keys=_ABG_KEYS, title="ABG گاز خون شریانی")
+
+
+def _render_hemo_form(r: dict[str, Any] | None) -> None:
+    _render_field_panel(r, keys=_HEMO_KEYS, title="همودینامیک و علائم حیاتی")
 
 
 def _render_mic_upload(*, append: bool, key_suffix: str) -> None:
@@ -847,6 +873,7 @@ def _render_result(r: dict[str, Any]) -> None:
     _render_vent_settings_form(r)
     _render_measure_form(r)
     _render_abg_form(r)
+    _render_hemo_form(r)
 
     patient_rows = _rows_for_keys(r, _PATIENT_KEYS)
     transcript = (r.get("raw_text") or "").strip()
@@ -877,7 +904,8 @@ def _render_result(r: dict[str, Any]) -> None:
 
     missing = [k for k in (r.get("missing") or []) if k != "ibw_kg"]
     focus_missing = (
-        [k for k in missing if k in _ABG_KEYS]
+        [k for k in missing if k in _HEMO_KEYS]
+        or [k for k in missing if k in _ABG_KEYS]
         or [k for k in missing if k in _MEASURE_KEYS]
         or [k for k in missing if k in _VENT_KEYS]
     )

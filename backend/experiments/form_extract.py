@@ -1,7 +1,7 @@
-"""Extract HakimAI form fields from Persian speech (patient + settings + measurement + ABG).
+"""Extract HakimAI form fields from Persian speech (patient + vent + ABG + hemodynamics).
 
 Used by voice-form experiment UI and collaborator ``/api/cases`` → ``fields``.
-Patient / Settings / Measurement keys stay stable; ABG-tab keys are additive.
+Earlier tab keys stay stable; hemodynamics keys are additive.
 """
 from __future__ import annotations
 
@@ -80,6 +80,15 @@ FIELD_LABELS_FA: dict[str, str] = {
     "hco3_meq_l": "HCO3 (mEq/L)",
     "base_excess_meq_l": "Base Excess (mEq/L)",
     "pf_ratio": "P/F ratio (محاسباتی)",
+    # --- Hemodynamics / vital signs tab (additive) ---
+    "sbp_mmhg": "SBP (mmHg)",
+    "dbp_mmhg": "DBP (mmHg)",
+    "map_mmhg": "MAP (محاسباتی، mmHg)",
+    "hr_bpm": "HR (bpm)",
+    "temperature_c": "دما (°C)",
+    "urine_output_ml_hr": "Urine output (mL/hr)",
+    "io_balance_24h_ml": "I&O balance 24h (mL)",
+    "vasopressor_active": "Vasopressor",
 }
 
 # HakimAI Settings-tab mode dropdown values (exact strings for UI mapping)
@@ -304,6 +313,23 @@ def compute_pf_ratio(
     if frac <= 0:
         return None
     return round(pao2 / frac, 1)
+
+
+def compute_map_mmhg(
+    sbp_mmhg: int | float | None,
+    dbp_mmhg: int | float | None,
+) -> float | None:
+    """MAP = DBP + (SBP − DBP) / 3."""
+    if sbp_mmhg is None or dbp_mmhg is None:
+        return None
+    try:
+        sbp = float(sbp_mmhg)
+        dbp = float(dbp_mmhg)
+    except (TypeError, ValueError):
+        return None
+    if sbp <= 0 or dbp <= 0 or sbp < dbp:
+        return None
+    return round(dbp + (sbp - dbp) / 3.0, 1)
 
 
 def _extract_gender(text: str) -> Gender | None:
@@ -1327,6 +1353,211 @@ def _extract_pf_ratio(text: str) -> float | None:
     )
 
 
+def _extract_bp_pair(text: str) -> tuple[float | None, float | None]:
+    """Common «فشار خون ۱۲۰ روی ۸۰» / «120/80» / spoken style."""
+    m = re.search(
+        r"(?:فشار\s*خون|blood\s*pressure|\bbp\b)\s*[:\-]?\s*"
+        r"(\d{2,3})\s*(?:روی|/|بر)\s*(\d{2,3})",
+        text,
+        re.I,
+    )
+    if not m:
+        m = re.search(r"\b(\d{2,3})\s*/\s*(\d{2,3})\b", text)
+    if m:
+        sbp, dbp = float(m.group(1)), float(m.group(2))
+        if 60 <= sbp <= 260 and 30 <= dbp <= 160 and sbp >= dbp:
+            return sbp, dbp
+    # Spoken: فشار خون صد و بیست روی هشتاد
+    m = re.search(
+        r"(?:فشار\s*خون|blood\s*pressure|\bbp\b)\s*[:\-]?\s*"
+        r"((?:[^\s]+(?:\s+و\s+[^\s]+){0,3}))\s*(?:روی|/|بر)\s*"
+        r"((?:[^\s]+(?:\s+و\s+[^\s]+){0,2}))",
+        text,
+        re.I,
+    )
+    if m:
+        sbp_i = persian_spoken_number(m.group(1).strip().strip(" .،-"))
+        dbp_i = persian_spoken_number(m.group(2).strip().strip(" .،-"))
+        if (
+            sbp_i is not None
+            and dbp_i is not None
+            and 60 <= sbp_i <= 260
+            and 30 <= dbp_i <= 160
+            and sbp_i >= dbp_i
+        ):
+            return float(sbp_i), float(dbp_i)
+    return None, None
+
+
+def _extract_sbp(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"\bsbp\b",
+            r"systolic",
+            r"اس\s*بی\s*پی",
+            r"فشار\s*سیستول(?:یک)?",
+            r"سیستول(?:یک)?",
+        ),
+        min_v=60,
+        max_v=260,
+    )
+
+
+def _extract_dbp(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"\bdbp\b",
+            r"diastolic",
+            r"دی\s*بی\s*پی",
+            r"فشار\s*دیاستول(?:یک)?",
+            r"دیاستول(?:یک)?",
+        ),
+        min_v=30,
+        max_v=160,
+    )
+
+
+def _extract_map_spoken(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"\bmap\b",
+            r"mean\s*arterial",
+            r"ام\s*ای\s*پی",
+            r"فشار\s*متوسط\s*شریانی",
+        ),
+        min_v=30,
+        max_v=180,
+    )
+
+
+def _extract_hr(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"\bhr\b",
+            r"heart\s*rate",
+            r"اچ\s*آر",
+            r"ضربان\s*قلب",
+            r"نبض",
+            r"ضربان",
+        ),
+        min_v=20,
+        max_v=250,
+    )
+
+
+def _extract_temperature(text: str) -> float | None:
+    val = _number_after_labels(
+        text,
+        (
+            r"temperature",
+            r"\btemp\b",
+            r"دما",
+            r"درجه\s*حرارت",
+            r"درجه\s*سانتی[\s\-]?گراد",
+        ),
+        min_v=30,
+        max_v=45,
+    )
+    if val is not None:
+        return float(val)
+    # «سی و هفت و نیم درجه»
+    m = re.search(
+        r"((?:[^\s]+(?:\s+و\s+[^\s]+){0,3}|\d+(?:\.\d+)?))\s*"
+        r"(?:درجه(?:\s*سانتی[\s\-]?گراد)?|°\s*c)",
+        text,
+        re.I,
+    )
+    if m:
+        raw = m.group(1).strip()
+        if re.fullmatch(r"\d+(?:\.\d+)?", raw):
+            v = float(raw)
+        else:
+            # half degree: … و نیم
+            half = False
+            cleaned = raw
+            if re.search(r"\bنیم\b", cleaned):
+                half = True
+                cleaned = re.sub(r"\s*و?\s*نیم\b", "", cleaned).strip()
+            spoken = persian_spoken_number(cleaned)
+            v = float(spoken) + (0.5 if half else 0.0) if spoken is not None else None
+        if v is not None and 30 <= v <= 45:
+            return round(v, 1)
+    return None
+
+
+def _extract_urine_output(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"urine\s*output",
+            r"urine",
+            r"خروجی\s*ادرار",
+            r"ادرار(?:\s*خروجی)?",
+            r"یورین",
+        ),
+        min_v=0,
+        max_v=1000,
+    )
+
+
+def _extract_io_balance_24h(text: str) -> float | None:
+    label_re = (
+        r"i\s*&\s*o|i\s*and\s*o|io\s*balance|intake\s*output|"
+        r"آی\s*(?:و|اند|&)\s*او|بالانس(?:\s*مایعات)?|تعادل\s*مایعات|"
+        r"بالانس\s*۲۴\s*ساعته|بالانس\s*24\s*ساعته"
+    )
+    m = re.search(
+        rf"(?:{label_re})\s*[:\-]?\s*(-?\d+(?:\.\d+)?)",
+        text,
+        re.I,
+    )
+    if m:
+        val = float(m.group(1))
+        if -5000 <= val <= 5000:
+            return val
+    m = re.search(
+        rf"(?:{label_re})\s*[:\-]?\s*(منفی|مثبت)?\s*"
+        r"((?:[^\s]+(?:\s+و\s+[^\s]+){0,3}|\d+(?:\.\d+)?))",
+        text,
+        re.I,
+    )
+    if m:
+        sign_word = (m.group(1) or "").strip()
+        raw = m.group(2).strip()
+        if re.fullmatch(r"\d+(?:\.\d+)?", raw):
+            val = float(raw)
+        else:
+            spoken = persian_spoken_number(raw)
+            val = float(spoken) if spoken is not None else None
+        if val is not None:
+            if sign_word == "منفی":
+                val = -abs(val)
+            elif sign_word == "مثبت":
+                val = abs(val)
+            if -5000 <= val <= 5000:
+                return val
+    return None
+
+
+def _extract_vasopressor(text: str) -> bool | None:
+    return _extract_bool_flag(
+        text,
+        (
+            r"vasopressor",
+            r"وازوپرسور",
+            r"وازو\s*پرسور",
+            r"وازوپرسورها",
+            r"نوراپی\s*نفرین",
+            r"norepi(?:nephrine)?",
+            r"noradrenaline",
+        ),
+    )
+
+
 def _extract_after_keyword(text: str, keywords: tuple[str, ...], max_len: int = 120) -> str | None:
     for kw in keywords:
         m = re.search(
@@ -1348,7 +1579,7 @@ def format_field_value(key: str, value: Any) -> str:
         return "—"
     if key == "gender":
         return "مرد" if value == "male" else "زن" if value == "female" else str(value)
-    if key in ("sedation_active", "recent_surgery", "fever"):
+    if key in ("sedation_active", "recent_surgery", "fever", "vasopressor_active"):
         return "بله" if value else "خیر"
     if key == "tube_type":
         return "ETT (دهان)" if value == "ETT" else "Trach (تراکئوستومی)" if value == "Trach" else str(value)
@@ -1385,6 +1616,16 @@ def format_field_value(key: str, value: Any) -> str:
         return f"{value} mEq/L"
     if key == "base_excess_meq_l":
         return f"{value} mEq/L"
+    if key in ("sbp_mmhg", "dbp_mmhg", "map_mmhg"):
+        return f"{value} mmHg"
+    if key == "hr_bpm":
+        return f"{value} bpm"
+    if key == "temperature_c":
+        return f"{value} °C"
+    if key == "urine_output_ml_hr":
+        return f"{value} mL/hr"
+    if key == "io_balance_24h_ml":
+        return f"{value} mL"
     if key == "vt_set_ml":
         return f"{value} ml"
     if key == "rr_set_bpm":
@@ -1393,10 +1634,10 @@ def format_field_value(key: str, value: Any) -> str:
 
 
 def extract_patient_demographics(transcript: str) -> dict[str, Any]:
-    """Parse HakimAI form fields (patient + vent settings + measurement + ABG) from speech.
+    """Parse HakimAI form fields (patient + vent + measurement + ABG + hemodynamics).
 
     Backward-compatible name; returns flat keys + found/missing lists.
-    Existing patient/settings/measurement keys are unchanged; ABG keys are additive.
+    Earlier tab keys stay unchanged; hemodynamics keys are additive.
     """
     raw = (transcript or "").strip()
     text = normalize_persian_text(raw)
@@ -1493,6 +1734,24 @@ def extract_patient_demographics(transcript: str) -> dict[str, Any]:
     if pf_ratio is None:
         pf_ratio = _extract_pf_ratio(text)
 
+    # Hemodynamics / vital signs (additive)
+    sbp_mmhg = _extract_sbp(text)
+    dbp_mmhg = _extract_dbp(text)
+    if sbp_mmhg is None or dbp_mmhg is None:
+        pair_sbp, pair_dbp = _extract_bp_pair(text)
+        if sbp_mmhg is None:
+            sbp_mmhg = pair_sbp
+        if dbp_mmhg is None:
+            dbp_mmhg = pair_dbp
+    map_mmhg = compute_map_mmhg(sbp_mmhg, dbp_mmhg)
+    if map_mmhg is None:
+        map_mmhg = _extract_map_spoken(text)
+    hr_bpm = _extract_hr(text)
+    temperature_c = _extract_temperature(text)
+    urine_output_ml_hr = _extract_urine_output(text)
+    io_balance_24h_ml = _extract_io_balance_24h(text)
+    vasopressor_active = _extract_vasopressor(text)
+
     fields: dict[str, Any] = {
         "gender": gender,
         "age": age,
@@ -1556,6 +1815,14 @@ def extract_patient_demographics(transcript: str) -> dict[str, Any]:
         "hco3_meq_l": hco3_meq_l,
         "base_excess_meq_l": base_excess_meq_l,
         "pf_ratio": pf_ratio,
+        "sbp_mmhg": sbp_mmhg,
+        "dbp_mmhg": dbp_mmhg,
+        "map_mmhg": map_mmhg,
+        "hr_bpm": hr_bpm,
+        "temperature_c": temperature_c,
+        "urine_output_ml_hr": urine_output_ml_hr,
+        "io_balance_24h_ml": io_balance_24h_ml,
+        "vasopressor_active": vasopressor_active,
     }
     found = [k for k, v in fields.items() if v is not None]
     # IBW alone shouldn't count as "heard" — only when gender+height present
@@ -1573,7 +1840,7 @@ def extract_patient_demographics(transcript: str) -> dict[str, Any]:
 
 
 def finalize_patient_fields(fields: dict[str, Any], *, raw_text: str = "") -> dict[str, Any]:
-    """Recompute IBW / VT/IBW / P/F / found / missing after merge or manual edit."""
+    """Recompute IBW / VT/IBW / P/F / MAP / found / missing after merge or manual edit."""
     gender = fields.get("gender")
     height_cm = fields.get("height_cm")
     height_int: int | None
@@ -1593,6 +1860,9 @@ def finalize_patient_fields(fields: dict[str, Any], *, raw_text: str = "") -> di
     computed_pf = compute_pf_ratio(out.get("pao2_mmhg"), out.get("fio2_pct"))
     if computed_pf is not None:
         out["pf_ratio"] = computed_pf
+    computed_map = compute_map_mmhg(out.get("sbp_mmhg"), out.get("dbp_mmhg"))
+    if computed_map is not None:
+        out["map_mmhg"] = computed_map
     found = [k for k, v in out.items() if v is not None]
     if "ibw_kg" in found and (out.get("gender") is None or out.get("height_cm") is None):
         found = [k for k in found if k != "ibw_kg"]

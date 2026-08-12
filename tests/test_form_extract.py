@@ -6,6 +6,7 @@ import unittest
 from backend.experiments.form_extract import (
     FIELD_LABELS_FA,
     compute_ibw_kg,
+    compute_map_mmhg,
     compute_pf_ratio,
     compute_vt_ibw_ml_kg,
     confirmation_speech_fa,
@@ -249,6 +250,41 @@ class FormExtractTests(unittest.TestCase):
     def test_ph_spoken_medical_style(self) -> None:
         r = extract_patient_demographics("پی اچ هفت و سی و پنج")
         self.assertEqual(r["ph"], 7.35)
+
+    def test_hemodynamics_and_map(self) -> None:
+        r = extract_patient_demographics(
+            "فشار خون ۱۲۰ روی ۸۰ اچ آر ۹۰ دما ۳۷ "
+            "خروجی ادرار ۵۰ بالانس مایعات مثبت ۵۰۰ وازوپرسور ندارد"
+        )
+        self.assertEqual(r["sbp_mmhg"], 120.0)
+        self.assertEqual(r["dbp_mmhg"], 80.0)
+        self.assertEqual(r["map_mmhg"], compute_map_mmhg(120.0, 80.0))
+        self.assertEqual(r["map_mmhg"], 93.3)
+        self.assertEqual(r["hr_bpm"], 90.0)
+        self.assertEqual(r["temperature_c"], 37.0)
+        self.assertEqual(r["urine_output_ml_hr"], 50.0)
+        self.assertEqual(r["io_balance_24h_ml"], 500.0)
+        self.assertFalse(r["vasopressor_active"])
+
+    def test_map_from_spoken_bp_pair(self) -> None:
+        r = extract_patient_demographics("فشار خون صد و بیست روی هشتاد")
+        self.assertEqual(r["sbp_mmhg"], 120.0)
+        self.assertEqual(r["dbp_mmhg"], 80.0)
+        self.assertEqual(r["map_mmhg"], 93.3)
+
+    def test_map_recomputed_on_merge(self) -> None:
+        base = extract_patient_demographics("اس بی پی ۱۱۰")
+        incoming = extract_patient_demographics("دی بی پی ۷۰")
+        merged = merge_patient_extractions(base, incoming)
+        self.assertEqual(merged["sbp_mmhg"], 110.0)
+        self.assertEqual(merged["dbp_mmhg"], 70.0)
+        self.assertEqual(merged["map_mmhg"], compute_map_mmhg(110.0, 70.0))
+
+    def test_compute_map_helper(self) -> None:
+        self.assertEqual(compute_map_mmhg(120, 80), 93.3)
+        self.assertIsNone(compute_map_mmhg(None, 80))
+        self.assertIsNone(compute_map_mmhg(120, None))
+        self.assertIsNone(compute_map_mmhg(70, 90))
 
 
 if __name__ == "__main__":
