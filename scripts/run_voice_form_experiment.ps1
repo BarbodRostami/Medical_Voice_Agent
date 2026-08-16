@@ -11,5 +11,5 @@ if (-not (Test-Path $Py)) {
 }
 
 Write-Host "Python: $Py"
-Write-Host "Open http://localhost:8502 after startup"
-& $Py -m streamlit run "backend\experiments\voice_form_ui.py" --server.port 8502 --server.headless true --browser.gatherUsageStats false
+Write-Host "Open http://localhost:8600 after startup"
+& $Py -m streamlit run "backend\experiments\voice_form_ui.py" --server.port 8600 --server.address 127.0.0.1 --server.headless true --browser.gatherUsageStats false

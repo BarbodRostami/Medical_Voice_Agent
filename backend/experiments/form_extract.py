@@ -5,12 +5,14 @@ Earlier tab keys stay stable; hemodynamics keys are additive.
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 from typing import Any, Literal
 
 Gender = Literal["male", "female"]
 
-EXTRACT_VERSION = "patient-tab-v1"
+EXTRACT_VERSION = "hemo-slot-v12"
 
 # Persian labels for UI (order matters for display)
 FIELD_LABELS_FA: dict[str, str] = {
@@ -89,6 +91,27 @@ FIELD_LABELS_FA: dict[str, str] = {
     "urine_output_ml_hr": "Urine output (mL/hr)",
     "io_balance_24h_ml": "I&O balance 24h (mL)",
     "vasopressor_active": "Vasopressor",
+    # --- Lab tab (additive) ---
+    "hb_gdl": "Hb (g/dL)",
+    "hct_pct": "Hct (%)",
+    "wbc_k_ul": "WBC (k/µL)",
+    "platelets_k_ul": "Platelets (k/µL)",
+    "na_meq_l": "Na (mEq/L)",
+    "k_meq_l": "K (mEq/L)",
+    "ca_mg_dl": "Ca (mg/dL)",
+    "mg_mg_dl": "Mg (mg/dL)",
+    "phosphate_mg_dl": "Phosphate (mg/dL)",
+    "bun_mg_dl": "BUN (mg/dL)",
+    "creatinine_mg_dl": "Creatinine (mg/dL)",
+    "albumin_g_dl": "Albumin (g/dL)",
+    "ast_u_l": "AST (U/L)",
+    "alt_u_l": "ALT (U/L)",
+    "bilirubin_mg_dl": "Bilirubin (mg/dL)",
+    "crp_mg_l": "CRP (mg/L)",
+    "procalcitonin_ng_ml": "Procalcitonin (ng/mL)",
+    "glucose_mg_dl": "Glucose (mg/dL)",
+    "esr_mm_hr": "ESR (mm/hr)",
+    "lactate_mmol_l": "Lactate (mmol/L)",
 }
 
 # HakimAI Settings-tab mode dropdown values (exact strings for UI mapping)
@@ -208,13 +231,20 @@ def normalize_persian_digits(text: str) -> str:
     return text.translate(_PERSIAN_DIGITS)
 
 
+_ARABIC_DIACRITICS = re.compile(r"[\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06dc\u06df-\u06e4\u06e7\u06e8\u06ea-\u06ed]")
+
+
 def normalize_persian_text(text: str) -> str:
     t = normalize_persian_digits(text or "")
+    # Strip Arabic diacritics (harakat/tanwin) so «اِم» == «ام» in regex
+    t = _ARABIC_DIACRITICS.sub("", t)
     t = t.replace("\u064a", "\u06cc")
     t = t.replace("\u0649", "\u06cc")
     t = t.replace("\u0643", "\u06a9")
-    t = t.replace("\u200c", " ")
+    # Delete ZWNJ so «مای‌عات» stays «مایعات» (space would split the label).
+    t = t.replace("\u200c", "")
     t = t.replace("\u200f", "").replace("\u200e", "")
+    t = t.replace("&amp;", "&")
     t = t.replace("،", " ").replace(",", " ").replace(";", " ")
     # Frequent STT garbling on demographics phrases (collaborator TTS→STT)
     for bad, good in (
@@ -226,9 +256,56 @@ def normalize_persian_text(text: str) -> str:
         ("حفتاد", "هفتاد"),
         ("حضتاد", "هفتاد"),
         ("سد و", "صد و"),
+        # Hemodynamics glued / garbled tokens
+        ("صدوبیست", "صد و بیست"),
+        ("صدو بیست", "صد و بیست"),
+        ("صد وبیست", "صد و بیست"),
+        ("اسبیپی", "اس بی پی"),
+        ("اس بیپی", "اس بی پی"),
+        ("اس‌بی‌پی", "اس بی پی"),
+        ("اس-بی-پی", "اس بی پی"),
+        ("دیبیپی", "دی بی پی"),
+        ("دی بیپی", "دی بی پی"),
+        ("دی‌بی‌پی", "دی بی پی"),
+        ("آیو ", "آی او "),
+        ("آی‌او", "آی او"),
+        ("i and o", "i&o"),
+        ("i & o", "i&o"),
+        ("وازپرسور", "وازوپرسور"),
+        ("وزوپرسور", "وازوپرسور"),
+        ("وازو پرسر", "وازوپرسور"),
+        ("وازوپرسر", "وازوپرسور"),
+        ("نداره", "ندارد"),
+        ("اس تی پی", "اس بی پی"),
+        ("اس تیپی", "اس بی پی"),
+        ("اس‌تی‌پی", "اس بی پی"),
+        ("استیپی", "اس بی پی"),
+        ("اس بی بی", "اس بی پی"),
+        ("متن بی پی", "اس بی پی"),
+        ("متن بی بی", "اس بی پی"),
+        ("دی بی بی", "دی بی پی"),
+        ("دی تی پی", "دی بی پی"),
+        ("تمامی و هفت", "سی و هفت"),
+        ("تمامی هفت", "سی و هفت"),
+        ("مصیبت پانصد", "مثبت پانصد"),
+        ("dama", "دما"),
+        ("DAMA", "دما"),
+        ("Dama", "دما"),
+        ("مای عات", "مایعات"),
+        ("ما یعات", "مایعات"),
     ):
         t = t.replace(bad, good)
     t = re.sub(r"(^|\s)سد(\s|$)", r"\1صد\2", t)
+    t = re.sub(
+        r"(i&o|io|آی\s*او|بالانس)\s*مصیبت",
+        r"\1 مثبت",
+        t,
+        flags=re.I,
+    )
+    # Spaced Latin vitals → compact tokens for label matchers
+    t = re.sub(r"\bs\s*[\.\-]?\s*b\s*[\.\-]?\s*p\b", "sbp", t, flags=re.I)
+    t = re.sub(r"\bd\s*[\.\-]?\s*b\s*[\.\-]?\s*p\b", "dbp", t, flags=re.I)
+    t = re.sub(r"\bdama\b", "دما", t, flags=re.I)
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
@@ -330,6 +407,19 @@ def compute_map_mmhg(
     if sbp <= 0 or dbp <= 0 or sbp < dbp:
         return None
     return round(dbp + (sbp - dbp) / 3.0, 1)
+
+
+def compute_driving_pressure(
+    plateau_cmh2o: float | None,
+    peep_measured_cmh2o: float | None,
+    peep_set_cmh2o: float | None,
+) -> float | None:
+    """Driving Pressure = Plateau − PEEP (measured preferred over set)."""
+    peep = peep_measured_cmh2o if peep_measured_cmh2o is not None else peep_set_cmh2o
+    if plateau_cmh2o is None or peep is None:
+        return None
+    dp = round(plateau_cmh2o - peep, 1)
+    return dp if 0 < dp < 80 else None
 
 
 def _extract_gender(text: str) -> Gender | None:
@@ -495,15 +585,22 @@ def _extract_bool_flag(text: str, patterns: tuple[str, ...]) -> bool | None:
     ):
         return True
     if re.search(
-        rf"(?:{joined})\s*(?:ندارد|منفی|نیست|نه|غیرفعال|no)",
+        rf"(?:{joined})\s*(?:ندارد|نداره|منفی|نیست|نه|غیرفعال|no)",
         text,
         re.I,
     ):
         return False
     if re.search(rf"(?:بدون|فاقد)\s*(?:{joined})", text, re.I):
         return False
-    # «ندارد X» only when X starts immediately after ندارد (same clause)
-    if re.search(rf"ندارد\s+(?:{joined})", text, re.I):
+    # «ندارد/نداره X» only when X starts immediately after (same clause)
+    if re.search(rf"(?:ندارد|نداره)\s+(?:{joined})", text, re.I):
+        return False
+    # Trailing polarity: «وازوپرسور … ندارد»
+    if re.search(
+        rf"(?:{joined})(?:\s+\S+){{0,3}}\s+(?:ندارد|نداره|نیست|نه)\b",
+        text,
+        re.I,
+    ):
         return False
     if re.search(joined, text, re.I):
         return True
@@ -598,6 +695,86 @@ def _extract_ventilator_mode(text: str) -> str | None:
     return None
 
 
+_SIGN_POS = frozenset({"مثبت", "positive", "مصیبت", "+"})
+_SIGN_NEG = frozenset({"منفی", "negative", "-"})
+
+
+def _format_extracted_number(
+    val: float, *, as_int: bool
+) -> float | int:
+    if as_int:
+        return int(val) if val == int(val) else int(val)
+    return val
+
+
+def _parse_tail_number(
+    tail: str,
+    *,
+    min_v: float,
+    max_v: float,
+    as_int: bool = False,
+    allow_decimal: bool = False,
+) -> float | int | None:
+    """Read the first digit or spoken number in a short window after a label.
+
+    Skips filler words (units, «مایعات», یعنی, …) and optional مثبت/منفی so
+    STT can say «بالانس مایعات مثبت پانصد» or «بالانس مایعات مثبت ۵۰۰»
+    without a dedicated regex per phrasing.
+    """
+    tokens = [t for t in re.split(r"[\s:،,;]+", (tail or "").strip()) if t]
+    if not tokens:
+        return None
+    mag_max = max(abs(min_v), abs(max_v), 1.0)
+    sign = 1.0
+    skipped = 0
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i].strip(".-")
+        low = tok.lower()
+        if low in _SIGN_POS or tok in _SIGN_POS:
+            sign = 1.0
+            i += 1
+            continue
+        if low in _SIGN_NEG or tok in _SIGN_NEG:
+            sign = -1.0
+            i += 1
+            continue
+        is_num = bool(re.fullmatch(r"[+\-]?\d+(?:\.\d+)?", tok)) or tok in _ALL_WORDS
+        if not is_num:
+            skipped += 1
+            if skipped > 6:
+                return None
+            i += 1
+            continue
+        buf: list[str] = []
+        j = i
+        n_words = 0
+        while j < len(tokens) and n_words < 6:
+            piece = tokens[j].strip(".-")
+            is_decimal_sep = allow_decimal and piece == "ممیز"
+            if piece == "و" or is_decimal_sep or piece in _ALL_WORDS or re.fullmatch(
+                r"[+\-]?\d+(?:\.\d+)?", piece
+            ):
+                buf.append(piece)
+                if piece not in ("و", "ممیز"):
+                    n_words += 1
+                j += 1
+                continue
+            break
+        for n in range(len(buf), 0, -1):
+            phrase = " ".join(buf[:n]).strip()
+            if not phrase:
+                continue
+            parsed = _parse_spoken_or_digit(phrase, min_v=0, max_v=mag_max, allow_decimal=allow_decimal)
+            if parsed is None:
+                continue
+            val = float(parsed) * sign
+            if min_v <= val <= max_v:
+                return _format_extracted_number(val, as_int=as_int)
+        return None
+    return None
+
+
 def _number_after_labels(
     text: str,
     labels: tuple[str, ...],
@@ -605,39 +782,20 @@ def _number_after_labels(
     min_v: float,
     max_v: float,
     as_int: bool = False,
+    allow_decimal: bool = False,
 ) -> float | int | None:
-    """Find a numeric (digit or spoken Persian) value after any label."""
+    """Find a numeric (digit or spoken Persian) value after any label.
+
+    After the label we scan a short window: filler words are skipped, then the
+    next spoken or digit number is taken. This is the shared slot-filler so
+    each new Whisper wording does not need its own extractor.
+    """
     label_re = "|".join(labels)
-    # digits first
-    m = re.search(
-        rf"(?:{label_re})\s*(?:set|ست)?\s*[:\-]?\s*(\d+(?:\.\d+)?)",
-        text,
-        re.I,
-    )
-    if m:
-        val = float(m.group(1))
-        if min_v <= val <= max_v:
-            return int(val) if as_int and val == int(val) else (int(val) if as_int else val)
-    # spoken: label + up to 4 Persian number words
-    m = re.search(
-        rf"(?:{label_re})\s*(?:set|ست)?\s*[:\-]?\s*"
-        r"((?:[^\s]+(?:\s+و\s+[^\s]+){0,3}))",
-        text,
-        re.I,
-    )
-    if m:
-        phrase = m.group(1).strip()
-        # strip trailing unit words so persian_spoken_number can parse
-        phrase = re.sub(
-            r"\s*(?:درصد|percent|%|سانتی|cmh2o|cm\s*h2o|میلی[\s\-]?لیتر|ml|"
-            r"ثانیه|sec|bpm|لیتر(?:\s*بر\s*دقیقه)?|l/?min).*$",
-            "",
-            phrase,
-            flags=re.I,
-        ).strip()
-        val_i = persian_spoken_number(phrase)
-        if val_i is not None and min_v <= val_i <= max_v:
-            return int(val_i) if as_int else float(val_i)
+    for m in re.finditer(rf"(?:{label_re})", text, re.I):
+        tail = text[m.end() : m.end() + 96]
+        val = _parse_tail_number(tail, min_v=min_v, max_v=max_v, as_int=as_int, allow_decimal=allow_decimal)
+        if val is not None:
+            return val
     return None
 
 
@@ -655,11 +813,12 @@ def _extract_peep(text: str) -> float | None:
     )
     if val is not None:
         return float(val)
-    # Strip measured/auto phrases so bare peep/پیپ does not steal them
+    # Strip auto-peep / measured-peep phrases (with any following number, digit or spoken)
+    # so that bare "peep/پیپ" does not accidentally steal their value.
     cleaned = re.sub(
         r"(?:auto[\s\-]?peep|اتو\s*پیپ|peep\s*measured|measured\s*peep|"
         r"پیپ\s*اندازه(?:\s*|‌)?گیری(?:\s*شده)?|peep\s*total)"
-        r"[^\d]{0,20}\d+(?:\.\d+)?",
+        r"[^\u060C\u060C،,\n]{0,30}",
         " ",
         text,
         flags=re.I,
@@ -817,6 +976,7 @@ def _extract_t_hi(text: str) -> float | None:
         (r"t\s*hi", r"تی\s*های", r"زمان\s*بالا"),
         min_v=0.1,
         max_v=30,
+        allow_decimal=True,
     )
 
 
@@ -826,15 +986,17 @@ def _extract_t_lo(text: str) -> float | None:
         (r"t\s*lo", r"تی\s*لو", r"زمان\s*پایین"),
         min_v=0.1,
         max_v=30,
+        allow_decimal=True,
     )
 
 
 def _extract_ti_max(text: str) -> float | None:
     return _number_after_labels(
         text,
-        (r"ti\s*max", r"تی\s*آی\s*مکس", r"تی\s*آی\s*макс", r"زمان\s*دم\s*حداکثر"),
+        (r"ti\s*(?:max|مکس)", r"تی\s*آی\s*(?:مکس|max)", r"زمان\s*دم\s*حداکثر"),
         min_v=0.1,
         max_v=10,
+        allow_decimal=True,
     )
 
 
@@ -853,6 +1015,7 @@ def _extract_rise_time(text: str) -> float | None:
         (r"rise\s*time", r"رایز\s*تایم", r"زمان\s*صعود"),
         min_v=0,
         max_v=5,
+        allow_decimal=True,
     )
 
 
@@ -896,10 +1059,10 @@ def _extract_rr_spontaneous(text: str) -> int | None:
         (
             r"rr\s*spontaneous",
             r"rr\s*spont",
-            r"آر\s*آر\s*اسپانتانیوس",
-            r"آر\s*آر\s*اسپانت",
+            r"آر\s*آر\s*اسپ\S*",
+            r"آر\s*آر\s*خودبخودی",
             r"تنفس\s*خودبخودی",
-            r"تنفس\s*اسپانتانیوس",
+            r"تنفس\s*اسپ\S*",
             r"spontaneous\s*(?:respiratory\s*)?rate",
         ),
         min_v=0,
@@ -915,7 +1078,9 @@ def _extract_vte(text: str) -> int | None:
         (
             r"vte",
             r"vt\s*e\b",
+            r"vta\b",
             r"وی\s*تی\s*ای",
+            r"وی\s*تی\s*[اآ]",
             r"حجم\s*بازدمی",
             r"expired\s*(?:tidal\s*)?volume",
         ),
@@ -956,6 +1121,8 @@ def _extract_spontaneous_mv(text: str) -> float | None:
         (
             r"spontaneous\s*mv",
             r"spont\s*mv",
+            r"اسپانت\S*\s*mv",
+            r"اسپانتانیوس\s*ام\s*وی",
             r"اسپانتانیوس\s*ام\s*وی",
             r"تهویه\s*خودبخودی",
         ),
@@ -970,10 +1137,10 @@ def _extract_peak_pressure(text: str) -> float | None:
         (
             r"peak\s*pressure",
             r"ppeak",
-            r"pip\b",
             r"پیک\s*پرشر",
             r"فشار\s*پیک",
             r"فشار\s*اوج",
+            r"پی\s*پیک",
         ),
         min_v=0,
         max_v=80,
@@ -1003,6 +1170,9 @@ def _extract_peep_measured(text: str) -> float | None:
             r"پیپ\s*اندازه(?:‌| )?گیری(?:\s*شده)?",
             r"پیپ\s*اندازه‌گیری",
             r"peep\s*total",
+            r"پیپ\s*مژر",
+            r"پیپ\s*مجر",
+            r"پیپ\s*مزر",
         ),
         min_v=0,
         max_v=40,
@@ -1127,8 +1297,16 @@ def _extract_r_inspiratory(text: str) -> float | None:
 def _extract_rcexp(text: str) -> float | None:
     return _number_after_labels(
         text,
-        (r"rcexp", r"rc\s*exp", r"آر\s*سی\s*اکسپ", r"ثابت\s*زمان\s*بازدم"),
+        (
+            r"rcexp",
+            r"rc\s*exp",
+            r"آر\s*سی\s*اکسپ\S*",
+            r"آر\s*سی\s*ex\S*",
+            r"ثابت\s*زمان\s*بازدم",
+            r"تایم\s*کانستنت",
+        ),
         min_v=0.1,
+        allow_decimal=True,
         max_v=20,
     )
 
@@ -1140,8 +1318,8 @@ def _extract_compliance_static(text: str) -> float | None:
             r"compliance\s*static",
             r"static\s*compliance",
             r"cstat",
-            r"کمپلیانس\s*استاتیک",
-            r"کمپلیانس\s*ایستا",
+            r"کمپل\S*انس\s*استاتیک",
+            r"کمپل\S*انس\s*ایستا",
         ),
         min_v=1,
         max_v=200,
@@ -1155,8 +1333,8 @@ def _extract_compliance_dynamic(text: str) -> float | None:
             r"compliance\s*dynamic",
             r"dynamic\s*compliance",
             r"cdyn",
-            r"کمپلیانس\s*دینامیک",
-            r"کمپلیانس\s*پویا",
+            r"کمپل\S*انس\s*دینامیک",
+            r"کمپل\S*انس\s*پویا",
         ),
         min_v=1,
         max_v=200,
@@ -1169,6 +1347,7 @@ def _extract_wob(text: str) -> float | None:
         (r"\bwob\b", r"work\s*of\s*breathing", r"کار\s*تنفس", r"دبلیو\s*او\s*بی"),
         min_v=0,
         max_v=20,
+        allow_decimal=True,
     )
 
 
@@ -1192,8 +1371,9 @@ def _extract_leak(text: str) -> float | None:
 
 def _extract_ph(text: str) -> float | None:
     """pH: digits (7.35) or spoken medical style (هفت و سی و پنج / هفت ممیز سی و پنج)."""
+    _ph_label = r"(?:\bph\b|پی\s*اچ|پی‌اچ|بی\s*اچ)"
     m = re.search(
-        r"(?:\bph\b|پی\s*اچ|پی‌اچ)\s*[:\-]?\s*(\d+(?:[./٫]\d+)?)",
+        rf"{_ph_label}\s*[:\-]?\s*(\d+(?:[./٫]\d+)?)",
         text,
         re.I,
     )
@@ -1202,7 +1382,7 @@ def _extract_ph(text: str) -> float | None:
         if 6.5 <= val <= 8.0:
             return round(val, 2)
     m = re.search(
-        r"(?:\bph\b|پی\s*اچ|پی‌اچ)\s*[:\-]?\s*"
+        rf"{_ph_label}\s*[:\-]?\s*"
         r"((?:[^\s]+(?:\s+و\s+[^\s]+){0,4}))",
         text,
         re.I,
@@ -1250,6 +1430,10 @@ def _extract_paco2(text: str) -> float | None:
             r"pa\s*co2",
             r"پی\s*ای\s*سی\s*او\s*دو",
             r"پی\s*آ\s*سی\s*او\s*دو",
+            r"پی\s*اس\s*او\s*دو",   # common Whisper garble
+            r"پی\s*اس\s*کو\s*دو",
+            r"پا\s*سی\s*او\s*دو",
+            r"کربن\s*دی\s*اکسید",
             r"دی\s*اکسید\s*کربن\s*شریانی",
         ),
         min_v=10,
@@ -1291,9 +1475,16 @@ def _extract_hco3(text: str) -> float | None:
         text,
         (
             r"hco3",
+            r"hco\s*3",
             r"بی\s*کربنات",
             r"بیکربنات",
+            r"بیکربینات",
+            r"بیکرینات",
             r"اچ\s*سی\s*او\s*سه",
+            r"اچ\s*کو\s*سه",
+            r"بی\s*کرب",          # truncated Whisper
+            r"ام\s*آر\s*ای",      # Whisper garble for بیکربنات
+            r"bicarbonate",
         ),
         min_v=5,
         max_v=50,
@@ -1301,40 +1492,24 @@ def _extract_hco3(text: str) -> float | None:
 
 
 def _extract_base_excess(text: str) -> float | None:
-    label_re = (
-        r"base\s*excess|\bbe\b|بیس\s*اکسس|بیس\s*اکسز|بیس‌اکسس|"
-        r"اضافه\s*باز|بیس\s*ایکسس"
-    )
-    m = re.search(
-        rf"(?:{label_re})\s*[:\-]?\s*(-?\d+(?:\.\d+)?)",
+    """Base Excess — handles مثبت/منفی sign words and spoken numbers."""
+    val = _number_after_labels(
         text,
-        re.I,
+        (
+            r"base\s*excess",
+            r"\bbe\b",
+            r"بیس\s*اکسس",
+            r"بیس\s*اکسز",
+            r"بیس‌اکسس",
+            r"بیس\s*ایکسس",
+            r"بیس\s*اکزس",
+            r"بیس\s*اگزس",
+            r"اضافه\s*باز",
+        ),
+        min_v=-30,
+        max_v=30,
     )
-    if m:
-        val = float(m.group(1))
-        if -30 <= val <= 30:
-            return val
-    # Spoken: بیس اکسس منفی دو / بیس اکسس دو
-    m = re.search(
-        rf"(?:{label_re})\s*[:\-]?\s*(منفی\s+)?"
-        r"((?:[^\s]+(?:\s+و\s+[^\s]+){0,2}|\d+(?:\.\d+)?))",
-        text,
-        re.I,
-    )
-    if m:
-        negative = bool(m.group(1))
-        raw = m.group(2).strip()
-        if re.fullmatch(r"\d+(?:\.\d+)?", raw):
-            val = float(raw)
-        else:
-            spoken = persian_spoken_number(raw)
-            val = float(spoken) if spoken is not None else None
-        if val is not None:
-            if negative:
-                val = -abs(val)
-            if -30 <= val <= 30:
-                return val
-    return None
+    return float(val) if val is not None else None
 
 
 def _extract_pf_ratio(text: str) -> float | None:
@@ -1395,7 +1570,10 @@ def _extract_sbp(text: str) -> float | None:
         (
             r"\bsbp\b",
             r"systolic",
-            r"اس\s*بی\s*پی",
+            r"ای[\s\-]*اس[\s\-]*بی[\s\-]*پی",
+            r"اس[\s\-]*بی[\s\-]*پی",
+            r"اس[\s\-]*تی[\s\-]*پی",
+            r"اسبی[\s\-]*پی",
             r"فشار\s*سیستول(?:یک)?",
             r"سیستول(?:یک)?",
         ),
@@ -1410,7 +1588,8 @@ def _extract_dbp(text: str) -> float | None:
         (
             r"\bdbp\b",
             r"diastolic",
-            r"دی\s*بی\s*پی",
+            r"دی[\s\-]*بی[\s\-]*پی",
+            r"دیبی[\s\-]*پی",
             r"فشار\s*دیاستول(?:یک)?",
             r"دیاستول(?:یک)?",
         ),
@@ -1449,43 +1628,112 @@ def _extract_hr(text: str) -> float | None:
     )
 
 
+def _parse_spoken_or_digit(
+    raw: str,
+    *,
+    min_v: float,
+    max_v: float,
+    allow_half: bool = False,
+    allow_decimal: bool = False,
+) -> float | None:
+    """Parse digit or Persian spoken number; optional «و نیم» and decimal fractions.
+
+    When allow_decimal=True, phrases like «صفر و سه» → 0.3, «یک و پنج» → 1.5
+    are tried (X و Y where Y is a 1-2 digit number, fraction = Y / 10^len(Y)).
+    """
+    phrase = (raw or "").strip().strip(" .،-:")
+    if not phrase:
+        return None
+    half = False
+    if allow_half and re.search(r"\bنیم\b", phrase):
+        half = True
+        phrase = re.sub(r"\s*و?\s*نیم\b", "", phrase).strip()
+    # Handle explicit decimal point word ممیز: «صفر ممیز سه» → 0.3
+    if "ممیز" in phrase:
+        left, _, right = phrase.partition("ممیز")
+        whole = persian_spoken_number(left.strip()) or (0 if left.strip() in ("صفر", "0") else None)
+        frac_int = persian_spoken_number(right.strip())
+        if whole is not None and frac_int is not None and 0 <= frac_int <= 99:
+            val = whole + frac_int / (10 ** len(str(frac_int)))
+            if half:
+                val += 0.5
+            if min_v <= val <= max_v:
+                return round(val, 2)
+        return None
+    if re.fullmatch(r"[+\-]?\d+(?:\.\d+)?", phrase):
+        val = float(phrase)
+        if half:
+            val += 0.5
+        if min_v <= val <= max_v:
+            return round(val, 1)
+        return None
+    # First try standard spoken number (handles compound numbers like «سی و پنج» = 35)
+    spoken = persian_spoken_number(phrase)
+    if spoken is not None:
+        val = float(spoken)
+        if half:
+            val += 0.5
+        if min_v <= val <= max_v:
+            return round(val, 1)
+    # Allow decimal only when left part is a single digit (0-9): «یک و پنج» → 1.5
+    # This avoids mis-parsing compound numbers like «سی و پنج» (35) as 30.5.
+    if allow_decimal and " و " in phrase:
+        left_tok, _, right_tok = phrase.partition(" و ")
+        left_val = persian_spoken_number(left_tok.strip())
+        right_val = persian_spoken_number(right_tok.strip())
+        if left_val is not None and right_val is not None and 0 <= left_val <= 9 and 0 <= right_val <= 99:
+            val = left_val + right_val / (10 ** len(str(int(right_val))))
+            if half:
+                val += 0.5
+            if min_v <= val <= max_v:
+                return round(val, 2)
+    return None
+
+
 def _extract_temperature(text: str) -> float | None:
-    val = _number_after_labels(
-        text,
-        (
-            r"temperature",
-            r"\btemp\b",
-            r"دما",
-            r"درجه\s*حرارت",
-            r"درجه\s*سانتی[\s\-]?گراد",
-        ),
-        min_v=30,
-        max_v=45,
+    """Body temperature (C); tolerant of STT label variants."""
+    labels = (
+        r"temperature",
+        r"body\s*temp(?:erature)?",
+        r"\btemp\b",
+        r"\bdama\b",
+        r"تمپ(?:راتور)?",
+        r"دما(?:ی\s*بدن)?",
+        r"حرارت(?:\s*بدن)?",
+        r"درجه\s*حرارت(?:\s*بدن)?",
+        r"درجه\s*سانتی[\s\-]?گراد",
     )
+    val = _number_after_labels(text, labels, min_v=30, max_v=45)
     if val is not None:
         return float(val)
-    # «سی و هفت و نیم درجه»
+
+    label_re = "|".join(labels)
     m = re.search(
-        r"((?:[^\s]+(?:\s+و\s+[^\s]+){0,3}|\d+(?:\.\d+)?))\s*"
-        r"(?:درجه(?:\s*سانتی[\s\-]?گراد)?|°\s*c)",
+        rf"(?:{label_re})\s*[:\-]?\s*"
+        r"((?:[^\s]+(?:\s+و\s+[^\s]+){0,3}|\d+(?:\.\d+)?))",
         text,
         re.I,
     )
     if m:
-        raw = m.group(1).strip()
-        if re.fullmatch(r"\d+(?:\.\d+)?", raw):
-            v = float(raw)
-        else:
-            # half degree: … و نیم
-            half = False
-            cleaned = raw
-            if re.search(r"\bنیم\b", cleaned):
-                half = True
-                cleaned = re.sub(r"\s*و?\s*نیم\b", "", cleaned).strip()
-            spoken = persian_spoken_number(cleaned)
-            v = float(spoken) + (0.5 if half else 0.0) if spoken is not None else None
-        if v is not None and 30 <= v <= 45:
-            return round(v, 1)
+        parsed = _parse_spoken_or_digit(
+            m.group(1), min_v=30, max_v=45, allow_half=True
+        )
+        if parsed is not None:
+            return parsed
+
+    # «سی و هفت درجه» / «۳۷ درجه سانتی‌گراد» without explicit دما
+    m = re.search(
+        r"((?:[^\s]+(?:\s+و\s+[^\s]+){0,3}|\d+(?:\.\d+)?))\s*"
+        r"(?:درجه(?:\s*(?:سانتی[\s\-]?گراد|حرارت|سلسیوس))?|°\s*c|\bcelsius\b)",
+        text,
+        re.I,
+    )
+    if m:
+        parsed = _parse_spoken_or_digit(
+            m.group(1), min_v=30, max_v=45, allow_half=True
+        )
+        if parsed is not None:
+            return parsed
     return None
 
 
@@ -1505,41 +1753,50 @@ def _extract_urine_output(text: str) -> float | None:
 
 
 def _extract_io_balance_24h(text: str) -> float | None:
-    label_re = (
-        r"i\s*&\s*o|i\s*and\s*o|io\s*balance|intake\s*output|"
-        r"آی\s*(?:و|اند|&)\s*او|بالانس(?:\s*مایعات)?|تعادل\s*مایعات|"
-        r"بالانس\s*۲۴\s*ساعته|بالانس\s*24\s*ساعته"
+    """24h I&O: require explicit بالانس/I&O keyword to avoid false ABG matches."""
+    val = _number_after_labels(
+        text,
+        (
+            r"بالانس[\s\-]*ما[\s]*ی[\s]*عات",
+            r"تعادل[\s\-]*ما[\s]*ی[\s]*عات",
+            r"i\s*&\s*o",
+            r"\bi&o\b",
+            r"i\s*and\s*o",
+            r"io\s*balance",
+            r"fluid\s*balance",
+            r"intake\s*output",
+            r"input\s*output",
+            # at least one space/dash required so «آیاو» (no space = SaO2 garble) does not match
+            r"آی[\s\-]+او",
+            r"آی\s+اند\s+او",
+            r"آی\s+and\s+او",
+            r"بالانس\s*(?:۲۴|24)\s*ساعته",
+            r"اینتیک\s*آوت\s*پوت",
+            r"بالانس",
+        ),
+        min_v=-5000,
+        max_v=5000,
     )
+    if val is not None:
+        return float(val)
+    # Value-before-label: «مثبت پانصد بالانس»
     m = re.search(
-        rf"(?:{label_re})\s*[:\-]?\s*(-?\d+(?:\.\d+)?)",
+        r"(منفی|مثبت|مصیبت|negative|positive)\s+"
+        r"((?:[^\s]+(?:\s+و\s+[^\s]+){0,3}|\d+(?:\.\d+)?))\s+"
+        r"(?:بالانس|i\s*&\s*o|آی[\s\-]+او|fluid\s*balance)",
         text,
         re.I,
     )
-    if m:
-        val = float(m.group(1))
-        if -5000 <= val <= 5000:
-            return val
-    m = re.search(
-        rf"(?:{label_re})\s*[:\-]?\s*(منفی|مثبت)?\s*"
-        r"((?:[^\s]+(?:\s+و\s+[^\s]+){0,3}|\d+(?:\.\d+)?))",
-        text,
-        re.I,
-    )
-    if m:
-        sign_word = (m.group(1) or "").strip()
-        raw = m.group(2).strip()
-        if re.fullmatch(r"\d+(?:\.\d+)?", raw):
-            val = float(raw)
-        else:
-            spoken = persian_spoken_number(raw)
-            val = float(spoken) if spoken is not None else None
-        if val is not None:
-            if sign_word == "منفی":
-                val = -abs(val)
-            elif sign_word == "مثبت":
-                val = abs(val)
-            if -5000 <= val <= 5000:
-                return val
+    if not m:
+        return None
+    raw = m.group(2).strip()
+    parsed = _parse_spoken_or_digit(raw, min_v=0, max_v=5000)
+    if parsed is None:
+        return None
+    sw = m.group(1).strip().lower()
+    val_f = -abs(float(parsed)) if sw in _SIGN_NEG else abs(float(parsed))
+    if -5000 <= val_f <= 5000:
+        return val_f
     return None
 
 
@@ -1548,14 +1805,218 @@ def _extract_vasopressor(text: str) -> bool | None:
         text,
         (
             r"vasopressor",
+            r"vaso\s*pressor",
             r"وازوپرسور",
             r"وازو\s*پرسور",
+            r"وازو\s*پرسر",
+            r"وازپرسور",
+            r"وزوپرسور",
             r"وازوپرسورها",
             r"نوراپی\s*نفرین",
             r"norepi(?:nephrine)?",
             r"noradrenaline",
         ),
     )
+
+
+# ── Lab extractors ─────────────────────────────────────────────────────────────
+
+def _extract_hb(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"\bhb\b", r"hemoglobin", r"هموگلوبین", r"هموگلبین",
+            r"هموگلوبن", r"هموگلوبیم", r"هب\b", r"اچ\s*بی\b",
+        ),
+        min_v=3.0, max_v=25.0,
+        allow_decimal=True,
+    )
+
+
+def _extract_hct(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"\bhct\b", r"hematocrit", r"هماتوکریت", r"هموتوکریت"),
+        min_v=5.0, max_v=75.0,
+        allow_decimal=True,
+    )
+
+
+def _extract_wbc(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"\bwbc\b", r"white\s*blood\s*cell", r"گلبول\s*سفید", r"وایت\s*بلاد\s*سل", r"لکوسیت"),
+        min_v=0.1, max_v=500.0,
+        allow_decimal=True,
+    )
+
+
+def _extract_platelets(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"platelet", r"پلاکت", r"ترومبوسیت"),
+        min_v=1.0, max_v=3000.0,
+        allow_decimal=True,
+    )
+
+
+def _extract_na(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"\bna\b", r"\bsodium\b", r"سدیم", r"سدیوم",
+            r"سدیام", r"سدیامً", r"نا\s*(?=[\d۰-۹])",
+            r"(?<![آا-ی])نا(?=\s*[:؛]?\s*[\d۰-۹])",
+        ),
+        min_v=100.0, max_v=185.0,
+        allow_decimal=True,
+    )
+
+
+def _extract_k(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"\bk\b", r"\bpotassium\b", r"پتاسیم", r"پتاسیوم",
+            r"پتاسیمم", r"پطاسیم", r"کا\s*(?=[\d۰-۹])",
+            r"(?<!\w)k(?=\s*[:؛]?\s*[\d۰-۹])",
+        ),
+        min_v=1.0, max_v=9.0,
+        allow_decimal=True,
+    )
+
+
+def _extract_ca(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"\bca\b", r"\bcalcium\b", r"کلسیم", r"کلسیوم"),
+        min_v=4.0, max_v=18.0,
+        allow_decimal=True,
+    )
+
+
+def _extract_mg(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"\bmg\b", r"\bmagnesium\b", r"منیزیم", r"منیزیوم"),
+        min_v=0.5, max_v=6.0,
+        allow_decimal=True,
+    )
+
+
+def _extract_phosphate(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"phosphate", r"phosphorus", r"فسفات", r"فسفر", r"فسفاط", r"فاسفات", r"فسفیت"),
+        min_v=0.3, max_v=15.0,
+        allow_decimal=True,
+    )
+
+
+def _extract_bun(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"\bbun\b", r"blood\s*urea\s*nitrogen", r"اوره", r"یوریا", r"بی\s*یو\s*ان"),
+        min_v=1.0, max_v=500.0,
+        allow_decimal=True,
+    )
+
+
+def _extract_creatinine(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"creatinine", r"کراتینین", r"کراتنین", r"\bcr\b"),
+        min_v=0.2, max_v=30.0,
+        allow_decimal=True,
+    )
+
+
+def _extract_albumin(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"albumin", r"آلبومین", r"البومین"),
+        min_v=0.5, max_v=6.0,
+        allow_decimal=True,
+    )
+
+
+def _extract_ast(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"\bast\b", r"\bsgot\b", r"آ\s*اس\s*تی", r"اس\s*جی\s*او\s*تی"),
+        min_v=5.0, max_v=10000.0,
+    )
+
+
+def _extract_alt(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"\balt\b", r"\bsgpt\b", r"آ\s*ال\s*تی", r"اس\s*جی\s*پی\s*تی"),
+        min_v=5.0, max_v=10000.0,
+    )
+
+
+def _extract_bilirubin(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"bilirubin", r"بیلیروبین", r"بیلی\s*روبین"),
+        min_v=0.1, max_v=60.0,
+        allow_decimal=True,
+    )
+
+
+def _extract_crp(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"\bcrp\b", r"c[\s\-]?reactive\s*protein", r"سی\s*آر\s*پی"),
+        min_v=0.0, max_v=1000.0,
+        allow_decimal=True,
+    )
+
+
+def _extract_procalcitonin(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"procalcitonin", r"\bpct\b", r"پروکلسیتونین", r"پروکلسیونین", r"پی\s*سی\s*تی"),
+        min_v=0.0, max_v=1000.0,
+        allow_decimal=True,
+    )
+
+
+def _extract_glucose(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (r"glucose", r"گلوکز", r"قند\s*خون", r"قند\b", r"بلاد\s*شوگر"),
+        min_v=20.0, max_v=1500.0,
+    )
+
+
+def _extract_esr(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"\besr\b", r"\besrc\b", r"\besc\b",
+            r"erythrocyte\s*sedimentation", r"رسوب\s*خون",
+            r"ای\s*اس\s*آر", r"ای\s*اس\s*ار", r"ا\s*س\s*ر\b",
+            r"سرعت\s*رسوب",
+        ),
+        min_v=0.0, max_v=200.0,
+    )
+
+
+def _extract_lactate(text: str) -> float | None:
+    return _number_after_labels(
+        text,
+        (
+            r"lactate", r"lactic\s*acid", r"لاکتات", r"لاکتیک",
+            r"لاکتیت", r"لاکتاط", r"لاکتت",
+        ),
+        min_v=0.1, max_v=30.0,
+        allow_decimal=True,
+    )
+
+
+# ── End Lab extractors ─────────────────────────────────────────────────────────
 
 
 def _extract_after_keyword(text: str, keywords: tuple[str, ...], max_len: int = 120) -> str | None:
@@ -1631,6 +2092,331 @@ def format_field_value(key: str, value: Any) -> str:
     if key == "rr_set_bpm":
         return f"{value} bpm"
     return str(value)
+
+
+def _fill_nulls_second_pass(text: str, fields: dict[str, Any]) -> None:
+    """Second pass: fill remaining null keys with looser label/number windows.
+
+    Does not overwrite values already set. Used so STT variants like ``I&O`` /
+    glued SBP still populate after the primary extractors.
+    """
+    extras: dict[str, tuple[tuple[str, ...], float, float]] = {
+        "sbp_mmhg": (
+            (r"\bsbp\b", r"اس[\s\-]*بی[\s\-]*پی", r"اس[\s\-]*تی[\s\-]*پی", r"سیستول"),
+            60,
+            260,
+        ),
+        "dbp_mmhg": (
+            (r"\bdbp\b", r"دی[\s\-]*بی[\s\-]*پی", r"دیاستول"),
+            30,
+            160,
+        ),
+        "hr_bpm": ((r"\bhr\b", r"اچ[\s\-]*آر", r"ضربان", r"نبض"), 20, 250),
+        "temperature_c": ((r"دما", r"تمپ", r"\bdama\b", r"حرارت", r"temperature"), 30, 45),
+        "urine_output_ml_hr": ((r"ادرار", r"urine", r"یورین"), 0, 1000),
+        "io_balance_24h_ml": (
+            (
+                r"\bi&o\b",
+                r"آی[\s\-]+او",
+                r"بالانس[\s\-]*ما[\s]*ی[\s]*عات",
+                r"بالانس[\s\-]*مایعات",
+                r"بالانس",
+            ),
+            -5000,
+            5000,
+        ),
+    }
+    for key, (labels, min_v, max_v) in extras.items():
+        if fields.get(key) is not None:
+            continue
+        val = _number_after_labels(text, labels, min_v=min_v, max_v=max_v)
+        if val is not None:
+            fields[key] = float(val)
+    if fields.get("io_balance_24h_ml") is None:
+        fields["io_balance_24h_ml"] = _extract_io_balance_24h(text)
+    if fields.get("sbp_mmhg") is None:
+        fields["sbp_mmhg"] = _extract_sbp(text)
+    if fields.get("vasopressor_active") is None:
+        fields["vasopressor_active"] = _extract_vasopressor(text)
+
+
+_LLM_HEMO_SYSTEM = """\
+You are a medical data extractor for Persian ICU speech (possibly with STT errors).
+Extract the following fields and return ONLY a valid JSON object — no markdown, no explanation.
+
+HEMODYNAMICS:
+  sbp_mmhg            — systolic BP mmHg (number or null)
+  dbp_mmhg            — diastolic BP mmHg (number or null)
+  hr_bpm              — heart rate bpm (number or null)
+  temperature_c       — body temperature °C (number or null)
+  urine_output_ml_hr  — urine output mL/hr (number or null)
+  io_balance_24h_ml   — 24-hour I&O fluid balance mL (number or null)
+                        IMPORTANT: extract ONLY when the text explicitly mentions
+                        بالانس، آی او، I&O، fluid balance, or تعادل مایعات.
+                        Do NOT extract from Base Excess, بیس اکسس, or other ABG fields.
+  vasopressor_active  — true/false/null
+
+ABG:
+  ph                  — arterial pH (number or null, typically 7.0–7.6)
+  paco2_mmhg          — PaCO2 mmHg (number or null)
+  pao2_mmhg           — PaO2 mmHg (number or null)
+  sao2_pct            — SaO2 % (number or null)
+  hco3_meq_l          — HCO3 mEq/L (number or null)
+  base_excess_meq_l   — Base Excess mEq/L, positive when مثبت, negative when منفی (number or null)
+
+VENTILATOR MEASUREMENTS:
+  rr_total_bpm        — total respiratory rate bpm (number or null); look for آر آر توتال / RR total
+  rr_spontaneous_bpm  — spontaneous respiratory rate bpm (number or null); look for آر آر اسپانتانیوس / RR spontaneous / آر آر اسپونتانیوس
+  rsbi                — Rapid Shallow Breathing Index (number or null, typically 30–200); look for RSBI / آر اس بی آی
+  rcexp_sec           — expiratory time constant seconds (number or null, typically 0.1–5); look for RC exp / آر سی اکسپ / ثابت زمان بازدم
+  wob_jl              — work of breathing J/L (number or null, typically 0–5); look for WOB / کار تنفس
+
+LAB VALUES (fallback only — fill if regex missed):
+  hb_gdl              — hemoglobin g/dL (number or null, 3–25); هموگلوبین / Hb / اچ بی
+  hct_pct             — hematocrit % (number or null, 5–75); هماتوکریت / HCT
+  wbc_k_ul            — WBC k/μL (number or null, 0.1–500); گلبول سفید / WBC / لکوسیت
+  platelets_k_ul      — platelets k/μL (number or null, 1–3000); پلاکت / ترومبوسیت
+  na_meq_l            — sodium mEq/L (number or null, 100–185); سدیم / Na / سدیوم
+  k_meq_l             — potassium mEq/L (number or null, 1–9); پتاسیم / K / پتاسیوم
+  ca_mg_dl            — calcium mg/dL (number or null, 4–18); کلسیم / Ca
+  mg_mg_dl            — magnesium mg/dL (number or null, 0.5–6); منیزیم / Mg
+  phosphate_mg_dl     — phosphate mg/dL (number or null, 0.3–15); فسفات / فسفر
+  bun_mg_dl           — BUN mg/dL (number or null, 1–500); اوره / BUN / یوریا
+  creatinine_mg_dl    — creatinine mg/dL (number or null, 0.2–30); کراتینین / Cr
+  albumin_g_dl        — albumin g/dL (number or null, 0.5–6); آلبومین
+  ast_u_l             — AST U/L (number or null, 5–10000); آ اس تی / SGOT
+  alt_u_l             — ALT U/L (number or null, 5–10000); آ ال تی / SGPT
+  bilirubin_mg_dl     — bilirubin mg/dL (number or null, 0.1–60); بیلیروبین
+  crp_mg_l            — CRP mg/L (number or null, 0–1000); سی آر پی / CRP
+  procalcitonin_ng_ml — procalcitonin ng/mL (number or null, 0–1000); پروکلسیتونین / PCT
+  glucose_mg_dl       — glucose mg/dL (number or null, 20–1500); گلوکز / قند / قند خون
+  esr_mm_hr           — ESR mm/hr (number or null, 0–200); ای اس آر / رسوب خون / سرعت رسوب
+  lactate_mmol_l      — lactate mmol/L (number or null, 0.1–30); لاکتات
+
+        Rules:
+- Return null for any field not mentioned in the text.
+- Convert Persian spoken numbers: پانصد=500, هشتاد=80, سی و پنج=35, هفت=7, etc.
+  Compound numbers like سی و پنج=35, صد و سی و هشت=138, چهل=40 (NOT decimal — no ممیز).
+- Fractions ONLY when ممیز is spoken, e.g. یک ممیز پنج=1.5, صفر ممیز سه=0.3.
+- Fractions like "هفت و سی و پنج" = 7.35 (for pH, using ممیز implicitly for pH).
+- io_balance_24h_ml: positive when مثبت/positive, negative when منفی/negative.
+- base_excess_meq_l: positive when مثبت/positive, negative when منفی/negative.
+- Return ONLY the JSON object.
+"""
+
+_LLM_HEMO_FIELDS = (
+    "sbp_mmhg",
+    "dbp_mmhg",
+    "hr_bpm",
+    "temperature_c",
+    "urine_output_ml_hr",
+    "io_balance_24h_ml",
+    "vasopressor_active",
+    "ph",
+    "paco2_mmhg",
+    "pao2_mmhg",
+    "sao2_pct",
+    "hco3_meq_l",
+    "base_excess_meq_l",
+)
+
+# These fields use LLM only as fallback (only_missing=True): regex is tried first.
+_LLM_FALLBACK_FIELDS: tuple[str, ...] = (
+    "rr_total_bpm",
+    "rr_spontaneous_bpm",
+    "rsbi",
+    "rcexp_sec",
+    "wob_jl",
+    # Lab fields — LLM as fallback when regex fails due to STT garbling
+    "hb_gdl",
+    "hct_pct",
+    "wbc_k_ul",
+    "platelets_k_ul",
+    "na_meq_l",
+    "k_meq_l",
+    "ca_mg_dl",
+    "mg_mg_dl",
+    "phosphate_mg_dl",
+    "bun_mg_dl",
+    "creatinine_mg_dl",
+    "albumin_g_dl",
+    "ast_u_l",
+    "alt_u_l",
+    "bilirubin_mg_dl",
+    "crp_mg_l",
+    "procalcitonin_ng_ml",
+    "glucose_mg_dl",
+    "esr_mm_hr",
+    "lactate_mmol_l",
+)
+
+
+_LLM_FIELD_RANGES: dict[str, tuple[float, float]] = {
+    "sbp_mmhg": (60.0, 260.0),
+    "dbp_mmhg": (30.0, 160.0),
+    "hr_bpm": (20.0, 250.0),
+    "temperature_c": (30.0, 45.0),
+    "urine_output_ml_hr": (0.0, 2000.0),
+    "io_balance_24h_ml": (-10000.0, 10000.0),
+    "ph": (6.5, 7.8),
+    "paco2_mmhg": (10.0, 150.0),
+    "pao2_mmhg": (20.0, 600.0),
+    "sao2_pct": (40.0, 100.0),
+    "hco3_meq_l": (5.0, 50.0),
+    "base_excess_meq_l": (-30.0, 30.0),
+    "fio2_pct": (21.0, 100.0),
+    "rr_total_bpm": (1.0, 60.0),
+    "rr_spontaneous_bpm": (0.0, 60.0),
+    "rsbi": (10.0, 400.0),
+    "rcexp_sec": (0.1, 10.0),
+    "wob_jl": (0.0, 20.0),
+    # Lab ranges
+    "hb_gdl": (3.0, 25.0),
+    "hct_pct": (5.0, 75.0),
+    "wbc_k_ul": (0.1, 500.0),
+    "platelets_k_ul": (1.0, 3000.0),
+    "na_meq_l": (100.0, 185.0),
+    "k_meq_l": (1.0, 9.0),
+    "ca_mg_dl": (4.0, 18.0),
+    "mg_mg_dl": (0.5, 6.0),
+    "phosphate_mg_dl": (0.3, 15.0),
+    "bun_mg_dl": (1.0, 500.0),
+    "creatinine_mg_dl": (0.2, 30.0),
+    "albumin_g_dl": (0.5, 6.0),
+    "ast_u_l": (5.0, 10000.0),
+    "alt_u_l": (5.0, 10000.0),
+    "bilirubin_mg_dl": (0.1, 60.0),
+    "crp_mg_l": (0.0, 1000.0),
+    "procalcitonin_ng_ml": (0.0, 1000.0),
+    "glucose_mg_dl": (20.0, 1500.0),
+    "esr_mm_hr": (0.0, 200.0),
+    "lactate_mmol_l": (0.1, 30.0),
+}
+
+
+def _llm_call(transcript: str) -> dict[str, Any] | None:
+    """Call GapGPT/OpenAI and return parsed JSON dict, or None on any failure."""
+    llm_flag = os.getenv("FORM_EXTRACT_LLM", "0").strip().lower()
+    if llm_flag not in ("1", "true", "yes", "on", "auto"):
+        return None
+
+    api_key = (
+        os.getenv("OPENAI_API_KEY")
+        or os.getenv("GAPGPT_API_KEY")
+        or os.getenv("OPENAI_TTS_API_KEY")
+        or ""
+    ).strip().strip("\"'")
+    if not api_key:
+        return None
+
+    base_url = (
+        os.getenv("OPENAI_BASE_URL")
+        or os.getenv("GAPGPT_BASE_URL")
+        or "https://api.openai.com/v1"
+    ).rstrip("/")
+    model = (
+        os.getenv("FORM_EXTRACT_LLM_MODEL")
+        or os.getenv("OPENAI_SPEECH_LLM_MODEL")
+        or "gpt-4o-mini"
+    ).strip()
+
+    try:
+        import requests as _req
+
+        resp = _req.post(
+            f"{base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "temperature": 0,
+                "max_tokens": 700,
+                "messages": [
+                    {"role": "system", "content": _LLM_HEMO_SYSTEM},
+                    {"role": "user", "content": transcript[:2000]},
+                ],
+            },
+            timeout=20,
+        )
+        if resp.status_code >= 400:
+            return None
+        raw_json = (
+            resp.json()
+            .get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+            or ""
+        ).strip()
+        raw_json = re.sub(r"^```(?:json)?\s*", "", raw_json)
+        raw_json = re.sub(r"\s*```$", "", raw_json).strip()
+        parsed = json.loads(raw_json)
+        # Flatten nested {"HEMODYNAMICS": {...}, "ABG": {...}} if model returns that
+        if isinstance(parsed, dict) and not any(k in parsed for k in _LLM_HEMO_FIELDS):
+            flat: dict[str, Any] = {}
+            for v in parsed.values():
+                if isinstance(v, dict):
+                    flat.update(v)
+            return flat if flat else parsed
+        return parsed
+    except Exception:
+        return None
+
+
+def _apply_llm_data(data: dict[str, Any], fields: dict[str, Any], *, only_missing: bool) -> None:
+    """Merge validated LLM output into fields dict.
+
+    When only_missing=True, existing non-None values are kept (fallback mode).
+    When only_missing=False (primary), LLM values overwrite regex AND explicit
+    LLM nulls clear regex false-positives for covered fields.
+    Fallback fields (_LLM_FALLBACK_FIELDS) always use only_missing=True regardless
+    of the caller's only_missing setting, so regex is never overwritten for them.
+    """
+    all_keys = list(_LLM_HEMO_FIELDS) + list(_LLM_FALLBACK_FIELDS)
+    for key in all_keys:
+        effective_only_missing = only_missing or (key in _LLM_FALLBACK_FIELDS)
+        if effective_only_missing and fields.get(key) is not None:
+            continue
+        if key not in data:
+            continue
+        val = data.get(key)
+        if val is None:
+            if not effective_only_missing:
+                fields[key] = None
+            continue
+        if key == "vasopressor_active":
+            if isinstance(val, bool):
+                fields[key] = val
+            elif isinstance(val, str):
+                fields[key] = val.strip().lower() in ("true", "yes", "1", "دارد")
+            continue
+        try:
+            num = float(val)
+        except (TypeError, ValueError):
+            continue
+        lo, hi = _LLM_FIELD_RANGES.get(key, (-1e9, 1e9))
+        if lo <= num <= hi:
+            fields[key] = num
+
+
+def _llm_hemo_fallback(transcript: str, fields: dict[str, Any]) -> None:
+    """LLM extraction: PRIMARY when FORM_EXTRACT_LLM=1, always fills missing fields.
+
+    Strategy:
+      1. Call LLM with the full transcript.
+      2. LLM results OVERWRITE any regex value that is not in a safe range —
+         but only if LLM returned a plausible number (range-checked).
+      3. Regex values that LLM returned null for are kept unchanged.
+
+    This means Whisper garbling of labels ("آیاو" for SaO2, "مقر بی اچ" for pH)
+    no longer matters — the LLM reads contextual meaning, not exact labels.
+    """
+    data = _llm_call(transcript)
+    if data is None:
+        return
+    # Primary mode: LLM is authoritative; regex values kept only where LLM is null
+    _apply_llm_data(data, fields, only_missing=False)
 
 
 def extract_patient_demographics(transcript: str) -> dict[str, Any]:
@@ -1712,6 +2498,10 @@ def extract_patient_demographics(transcript: str) -> dict[str, Any]:
     auto_peep_cmh2o = _extract_auto_peep(text)
     mean_pressure_cmh2o = _extract_mean_pressure(text)
     driving_pressure_cmh2o = _extract_driving_pressure(text)
+    if driving_pressure_cmh2o is None:
+        driving_pressure_cmh2o = compute_driving_pressure(
+            plateau_pressure_cmh2o, peep_measured_cmh2o, peep_cmh2o
+        )
     ie_ratio = _extract_ie_ratio(text)
     peak_flow_insp_lpm = _extract_peak_flow_insp(text)
     peak_flow_exp_lpm = _extract_peak_flow_exp(text)
@@ -1751,6 +2541,28 @@ def extract_patient_demographics(transcript: str) -> dict[str, Any]:
     urine_output_ml_hr = _extract_urine_output(text)
     io_balance_24h_ml = _extract_io_balance_24h(text)
     vasopressor_active = _extract_vasopressor(text)
+
+    # Lab tab
+    hb_gdl = _extract_hb(text)
+    hct_pct = _extract_hct(text)
+    wbc_k_ul = _extract_wbc(text)
+    platelets_k_ul = _extract_platelets(text)
+    na_meq_l = _extract_na(text)
+    k_meq_l = _extract_k(text)
+    ca_mg_dl = _extract_ca(text)
+    mg_mg_dl = _extract_mg(text)
+    phosphate_mg_dl = _extract_phosphate(text)
+    bun_mg_dl = _extract_bun(text)
+    creatinine_mg_dl = _extract_creatinine(text)
+    albumin_g_dl = _extract_albumin(text)
+    ast_u_l = _extract_ast(text)
+    alt_u_l = _extract_alt(text)
+    bilirubin_mg_dl = _extract_bilirubin(text)
+    crp_mg_l = _extract_crp(text)
+    procalcitonin_ng_ml = _extract_procalcitonin(text)
+    glucose_mg_dl = _extract_glucose(text)
+    esr_mm_hr = _extract_esr(text)
+    lactate_mmol_l = _extract_lactate(text)
 
     fields: dict[str, Any] = {
         "gender": gender,
@@ -1823,7 +2635,39 @@ def extract_patient_demographics(transcript: str) -> dict[str, Any]:
         "urine_output_ml_hr": urine_output_ml_hr,
         "io_balance_24h_ml": io_balance_24h_ml,
         "vasopressor_active": vasopressor_active,
+        "hb_gdl": hb_gdl,
+        "hct_pct": hct_pct,
+        "wbc_k_ul": wbc_k_ul,
+        "platelets_k_ul": platelets_k_ul,
+        "na_meq_l": na_meq_l,
+        "k_meq_l": k_meq_l,
+        "ca_mg_dl": ca_mg_dl,
+        "mg_mg_dl": mg_mg_dl,
+        "phosphate_mg_dl": phosphate_mg_dl,
+        "bun_mg_dl": bun_mg_dl,
+        "creatinine_mg_dl": creatinine_mg_dl,
+        "albumin_g_dl": albumin_g_dl,
+        "ast_u_l": ast_u_l,
+        "alt_u_l": alt_u_l,
+        "bilirubin_mg_dl": bilirubin_mg_dl,
+        "crp_mg_l": crp_mg_l,
+        "procalcitonin_ng_ml": procalcitonin_ng_ml,
+        "glucose_mg_dl": glucose_mg_dl,
+        "esr_mm_hr": esr_mm_hr,
+        "lactate_mmol_l": lactate_mmol_l,
     }
+    _fill_nulls_second_pass(text, fields)
+    if fields.get("map_mmhg") is None:
+        fields["map_mmhg"] = compute_map_mmhg(
+            fields.get("sbp_mmhg"), fields.get("dbp_mmhg")
+        )
+    # LLM fallback: fill any still-missing hemo field via GapGPT/OpenAI
+    _llm_hemo_fallback(raw, fields)
+    # Recompute MAP if LLM filled sbp/dbp but not map
+    if fields.get("map_mmhg") is None:
+        fields["map_mmhg"] = compute_map_mmhg(
+            fields.get("sbp_mmhg"), fields.get("dbp_mmhg")
+        )
     found = [k for k, v in fields.items() if v is not None]
     # IBW alone shouldn't count as "heard" — only when gender+height present
     if "ibw_kg" in found and (gender is None or height_cm is None):
@@ -1863,6 +2707,13 @@ def finalize_patient_fields(fields: dict[str, Any], *, raw_text: str = "") -> di
     computed_map = compute_map_mmhg(out.get("sbp_mmhg"), out.get("dbp_mmhg"))
     if computed_map is not None:
         out["map_mmhg"] = computed_map
+    computed_dp = compute_driving_pressure(
+        out.get("plateau_pressure_cmh2o"),
+        out.get("peep_measured_cmh2o"),
+        out.get("peep_cmh2o"),
+    )
+    if computed_dp is not None and out.get("driving_pressure_cmh2o") is None:
+        out["driving_pressure_cmh2o"] = computed_dp
     found = [k for k, v in out.items() if v is not None]
     if "ibw_kg" in found and (out.get("gender") is None or out.get("height_cm") is None):
         found = [k for k in found if k != "ibw_kg"]

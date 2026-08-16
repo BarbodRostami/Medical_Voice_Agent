@@ -7,12 +7,21 @@ Flow:
   3. Result: review, edit, missing hints, append voice, confirm TTS, copy JSON
 
 Does not change HakimAI /api/cases. Run (backend on :8000):
-  streamlit run backend/experiments/voice_form_ui.py --server.port 8502
+  streamlit run backend/experiments/voice_form_ui.py --server.port 8600
 """
 from __future__ import annotations
 
+import sys
+import pathlib as _pl
+
+# Ensure project root is on sys.path when Streamlit runs this file directly.
+_PROJECT_ROOT_BOOT = _pl.Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT_BOOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT_BOOT))
+
 import base64
 import hashlib
+import html
 import json
 import os
 import tempfile
@@ -32,6 +41,7 @@ from backend.experiments import form_extract as _form_extract
 
 importlib.reload(_form_extract)
 from backend.experiments.form_extract import (  # noqa: E402
+    EXTRACT_VERSION,
     FIELD_LABELS_FA,
     confirmation_speech_fa,
     export_fields_payload,
@@ -46,7 +56,7 @@ from backend.stt_utils import detect_audio_extension
 
 API_BASE = os.getenv("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 MAX_WAIT = 180
-GREETING = "سلام. متن نمونه تنظیمات ونتیلاتور را بخوانید یا آزاد بگویید."
+GREETING = "سلام. متن نمونه همودینامیک را بخوانید یا آزاد بگویید."
 
 # Read this aloud to test Settings-tab extraction
 SAMPLE_SCRIPT_VENT = (
@@ -82,11 +92,12 @@ SAMPLE_SCRIPT_ABG = (
 )
 
 SAMPLE_SCRIPT_HEMO = (
-    "فشار خون صد و بیست روی هشتاد. "
+    "اس بی پی صد و بیست. "
+    "دی بی پی هشتاد. "
     "اچ آر نود. "
-    "دما سی و هفت. "
+    "دما سی و هفت درجه. "
     "خروجی ادرار پنجاه. "
-    "بالانس مایعات مثبت پانصد. "
+    "آی او مثبت پانصد. "
     "وازوپرسور ندارد."
 )
 
@@ -169,6 +180,28 @@ _HEMO_KEYS = (
     "urine_output_ml_hr",
     "io_balance_24h_ml",
     "vasopressor_active",
+)
+_LAB_KEYS = (
+    "hb_gdl",
+    "hct_pct",
+    "wbc_k_ul",
+    "platelets_k_ul",
+    "na_meq_l",
+    "k_meq_l",
+    "ca_mg_dl",
+    "mg_mg_dl",
+    "phosphate_mg_dl",
+    "bun_mg_dl",
+    "creatinine_mg_dl",
+    "albumin_g_dl",
+    "ast_u_l",
+    "alt_u_l",
+    "bilirubin_mg_dl",
+    "crp_mg_l",
+    "procalcitonin_ng_ml",
+    "glucose_mg_dl",
+    "esr_mm_hr",
+    "lactate_mmol_l",
 )
 
 _BOOL_KEYS = ("sedation_active", "recent_surgery", "fever", "vasopressor_active")
@@ -317,6 +350,15 @@ def _stt_extract(
     content_type: str | None,
 ) -> dict[str, Any]:
     load_dotenv(_PROJECT_ROOT / ".env", override=False)
+    # Always pick up latest extractors without restarting Streamlit.
+    importlib.reload(_form_extract)
+    from backend.experiments.form_extract import (
+        extract_patient_demographics as extract_now,
+        merge_patient_extractions as _merge_unused,
+    )
+
+    del _merge_unused  # imported only to keep reload surface honest
+
     ext = detect_audio_extension(audio_bytes, filename, content_type)
     safe_name = filename if filename and Path(filename).suffix else f"recording{ext}"
     mime = content_type or {
@@ -356,10 +398,10 @@ def _stt_extract(
             raise RuntimeError(f"خطای سرور ({r.status_code}): {detail}")
         data = r.json()
         transcript = (data.get("transcript") or "").strip()
-        fields = data.get("fields")
-        if isinstance(fields, dict) and ("found" in fields or "missing" in fields):
-            return fields
-        return extract_patient_demographics(transcript)
+        # Always parse locally from the heard text (same path as paste-box).
+        parsed = extract_now(transcript)
+        parsed["raw_text"] = transcript or parsed.get("raw_text") or ""
+        return parsed
     finally:
         try:
             os.remove(path)
@@ -424,7 +466,12 @@ def _process_audio(
     st.session_state["error"] = ""
     try:
         parsed = _stt_extract(audio_bytes, audio_name, rec_type)
+        importlib.reload(_form_extract)
+        from backend.experiments.form_extract import extract_patient_demographics as extract_now
+
         text = (parsed.get("raw_text") or "").strip()
+        if text:
+            parsed = extract_now(text)
         if not text and not parsed.get("found"):
             st.session_state["error"] = (
                 "چیزی شنیده نشد. متن نمونه را بلند و واضح بخوانید."
@@ -446,6 +493,31 @@ def _process_audio(
                 st.session_state["phase"] = "append" if append else "listen"
     except Exception as e:
         st.session_state["error"] = str(e)
+        st.session_state["phase"] = "append" if append else "listen"
+    st.rerun()
+
+
+def _process_transcript(transcript: str, *, append: bool) -> None:
+    """Extract from pasted STT text (no audio) to isolate parser vs Whisper."""
+    importlib.reload(_form_extract)
+    from backend.experiments.form_extract import extract_patient_demographics as extract_now
+
+    text = (transcript or "").strip()
+    if not text:
+        st.session_state["error"] = "متن خالی است."
+        return
+    parsed = extract_now(text)
+    if append and st.session_state.get("result"):
+        merged = merge_patient_extractions(st.session_state["result"], parsed)
+    else:
+        merged = parsed
+    st.session_state["error"] = ""
+    if merged.get("found"):
+        st.session_state["result"] = merged
+        st.session_state["phase"] = "result"
+        st.session_state["confirm_played"] = False
+    else:
+        st.session_state["error"] = "از این متن فیلدی استخراج نشد."
         st.session_state["phase"] = "append" if append else "listen"
     st.rerun()
 
@@ -484,7 +556,7 @@ def _clipboard_button(payload: str, *, label: str = "کپی JSON") -> None:
 def _render_sample_script() -> None:
     mode = st.radio(
         "متن نمونه",
-        ("تنظیمات ونتیلاتور", "اندازه‌گیری", "ABG", "همودینامیک"),
+        ("همودینامیک", "ABG", "اندازه‌گیری", "تنظیمات ونتیلاتور"),
         horizontal=True,
         label_visibility="collapsed",
         key="sample_mode",
@@ -523,7 +595,7 @@ def _render_field_panel(
     cells: list[str] = []
     for key in keys:
         label = FIELD_LABELS_FA.get(key, key)
-        filled = key in found and data.get(key) is not None
+        filled = data.get(key) is not None
         if filled:
             val = format_field_value(key, data.get(key))
             cls = "vent-field filled"
@@ -534,7 +606,7 @@ def _render_field_panel(
             f'<div class="{cls}"><div class="fl">{label}</div>'
             f'<div class="fv">{val}</div></div>'
         )
-    filled_n = sum(1 for k in keys if k in found and data.get(k) is not None)
+    filled_n = sum(1 for k in keys if data.get(k) is not None)
     st.markdown(
         f"""
         <div class="vent-panel" dir="rtl">
@@ -564,6 +636,10 @@ def _render_abg_form(r: dict[str, Any] | None) -> None:
 
 def _render_hemo_form(r: dict[str, Any] | None) -> None:
     _render_field_panel(r, keys=_HEMO_KEYS, title="همودینامیک و علائم حیاتی")
+
+
+def _render_lab_form(r: dict[str, Any] | None) -> None:
+    _render_field_panel(r, keys=_LAB_KEYS, title="آزمایشگاه")
 
 
 def _render_mic_upload(*, append: bool, key_suffix: str) -> None:
@@ -596,6 +672,16 @@ def _render_mic_upload(*, append: bool, key_suffix: str) -> None:
     st.markdown(f'<p class="listening-hint">{hint}</p>', unsafe_allow_html=True)
     if uploaded is not None:
         _process_audio(uploaded.read(), uploaded.name, uploaded.type, append=append)
+
+    pasted = st.text_area(
+        "یا متن STT را اینجا بچسبان (بدون ویس)",
+        value="",
+        key=f"paste_{key_suffix}",
+        height=90,
+        placeholder="اس بی پی صد و بیست. دی بی پی هشتاد. ...",
+    )
+    if st.button("استخراج از متن", use_container_width=True, key=f"paste_go_{key_suffix}"):
+        _process_transcript(pasted, append=append)
 
 
 def _apply_edits_from_widgets() -> dict[str, Any]:
@@ -870,13 +956,32 @@ def _rows_for_keys(r: dict[str, Any], keys: tuple[str, ...]) -> list[str]:
 
 
 def _render_result(r: dict[str, Any]) -> None:
+    transcript = (r.get("raw_text") or "").strip()
+    if transcript:
+        safe = html.escape(transcript)
+        st.markdown(
+            f"""
+            <div class="result-card" dir="rtl">
+              <h3>متن STT (برای دیباگ)</h3>
+              <div class="section">{safe}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        # Debug expander: normalized text + copy button
+        with st.expander("دیباگ پیشرفته — متن نرمال‌شده"):
+            from backend.experiments.form_extract import normalize_persian_text  # local import ok
+            norm = normalize_persian_text(transcript)
+            st.text_area("متن پس از normalize (برای کپی دادن به تیم):", value=norm, height=80, key="dbg_norm")
+            st.caption(f"parser: {r.get('extract_version', '?')}")
+
+    _render_hemo_form(r)
+    _render_abg_form(r)
     _render_vent_settings_form(r)
     _render_measure_form(r)
-    _render_abg_form(r)
-    _render_hemo_form(r)
+    _render_lab_form(r)
 
     patient_rows = _rows_for_keys(r, _PATIENT_KEYS)
-    transcript = (r.get("raw_text") or "").strip()
     transcript_html = (
         f'<div class="section">متن: {transcript}</div>' if transcript else ""
     )
@@ -902,7 +1007,11 @@ def _render_result(r: dict[str, Any]) -> None:
             unsafe_allow_html=True,
         )
 
-    missing = [k for k in (r.get("missing") or []) if k != "ibw_kg"]
+    missing = [
+        k
+        for k in (r.get("missing") or [])
+        if k != "ibw_kg" and r.get(k) is None
+    ]
     focus_missing = (
         [k for k in missing if k in _HEMO_KEYS]
         or [k for k in missing if k in _ABG_KEYS]
@@ -956,7 +1065,7 @@ def _render_result(r: dict[str, Any]) -> None:
 # ─── Page ────────────────────────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="تست ویس → تنظیمات ونتیلاتور",
+    page_title="تست ویس → همودینامیک / فرم ICU",
     layout="centered",
     initial_sidebar_state="collapsed",
 )
@@ -993,8 +1102,11 @@ elif phase == "processing":
 
 elif phase == "append":
     _render_sample_script()
+    _render_hemo_form(st.session_state.get("result"))
+    _render_abg_form(st.session_state.get("result"))
     _render_vent_settings_form(st.session_state.get("result"))
     _render_measure_form(st.session_state.get("result"))
+    _render_lab_form(st.session_state.get("result"))
     st.markdown(
         '<p class="listening-hint">ادامه بدهید — فیلدهای قبلی نگه داشته می‌شوند</p>',
         unsafe_allow_html=True,
@@ -1007,7 +1119,16 @@ elif phase == "append":
         st.error(st.session_state["error"])
 
 else:
+    st.markdown(
+        '<p class="listening-hint" style="opacity:0.85;margin-bottom:0.35rem;">'
+        "تست همودینامیک — متن نمونه را بخوانید یا ویس آپلود کنید"
+        f"<br/><span style='opacity:0.45;font-size:0.8rem;'>parser {EXTRACT_VERSION}</span>"
+        "</p>",
+        unsafe_allow_html=True,
+    )
     _render_sample_script()
+    _render_hemo_form(st.session_state.get("result"))
+    _render_abg_form(st.session_state.get("result"))
     _render_vent_settings_form(st.session_state.get("result"))
     _render_measure_form(st.session_state.get("result"))
     _render_mic_upload(append=False, key_suffix="main")

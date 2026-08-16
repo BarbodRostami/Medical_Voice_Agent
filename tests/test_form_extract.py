@@ -286,6 +286,146 @@ class FormExtractTests(unittest.TestCase):
         self.assertIsNone(compute_map_mmhg(120, None))
         self.assertIsNone(compute_map_mmhg(70, 90))
 
+    def test_temperature_stt_variants(self) -> None:
+        cases = (
+            "دما سی و هفت",
+            "دما ۳۷",
+            "سی و هفت درجه",
+            "حرارت بدن ۳۷",
+            "تمپ ۳۶.۵",
+            "۳۷ درجه سانتی گراد",
+        )
+        expected = (37.0, 37.0, 37.0, 37.0, 36.5, 37.0)
+        for spoken, want in zip(cases, expected, strict=True):
+            r = extract_patient_demographics(spoken)
+            self.assertEqual(r["temperature_c"], want, msg=spoken)
+
+    def test_io_balance_stt_variants(self) -> None:
+        cases = (
+            ("بالانس مایعات مثبت ۵۰۰", 500.0),
+            ("بالانس مایعات مثبت پانصد", 500.0),
+            ("آی او مثبت پانصد", 500.0),
+            ("آی اند او ۵۰۰", 500.0),
+            ("مثبت ۵۰۰ بالانس", 500.0),
+            ("بالانس منفی ۲۰۰", -200.0),
+            ("fluid balance +300", 300.0),
+        )
+        for spoken, want in cases:
+            r = extract_patient_demographics(spoken)
+            self.assertEqual(r["io_balance_24h_ml"], want, msg=spoken)
+
+    def test_hemo_garbled_sbp_io_vaso(self) -> None:
+        r = extract_patient_demographics(
+            "اسبیپی صدوبیست دی بی پی هشتاد آیو مثبت پانصد وازپرسور نداره"
+        )
+        self.assertEqual(r["sbp_mmhg"], 120.0)
+        self.assertEqual(r["dbp_mmhg"], 80.0)
+        self.assertEqual(r["map_mmhg"], 93.3)
+        self.assertEqual(r["io_balance_24h_ml"], 500.0)
+        self.assertFalse(r["vasopressor_active"])
+
+    def test_vaso_stt_persar_typo(self) -> None:
+        r = extract_patient_demographics(
+            "اس بی پی صد و بیست دی بی پی هشتاد بالانس مایعات مثبت پانصد وازو پرسر ندارد"
+        )
+        self.assertEqual(r["sbp_mmhg"], 120.0)
+        self.assertEqual(r["io_balance_24h_ml"], 500.0)
+        self.assertFalse(r["vasopressor_active"])
+
+    def test_user_stt_debug_transcript(self) -> None:
+        """Exact collaborator-style STT line from the hemo UI debug box."""
+        r = extract_patient_demographics(
+            "اس بی پی صد و بیست، دی بی پی هشتاد، HR نود، دما سی و هفت درجه، "
+            "خروجی ادرار پنجاه، I&O مثبت پانصد، Vasopressor ندارد."
+        )
+        self.assertEqual(r["sbp_mmhg"], 120.0)
+        self.assertEqual(r["dbp_mmhg"], 80.0)
+        self.assertEqual(r["map_mmhg"], 93.3)
+        self.assertEqual(r["hr_bpm"], 90.0)
+        self.assertEqual(r["temperature_c"], 37.0)
+        self.assertEqual(r["urine_output_ml_hr"], 50.0)
+        self.assertEqual(r["io_balance_24h_ml"], 500.0)
+        self.assertFalse(r["vasopressor_active"])
+
+    def test_stt_letter_swaps_sbp_io_temp(self) -> None:
+        r = extract_patient_demographics(
+            "اس تی پی صد و بیست، دی بی پی هشتاد، HR نود، "
+            "دما تمامی و هفت درجه، خروجی ادرار پنجاه، "
+            "I&O مصیبت پانصد، Vasopressor ندارد."
+        )
+        self.assertEqual(r["sbp_mmhg"], 120.0)
+        self.assertEqual(r["dbp_mmhg"], 80.0)
+        self.assertEqual(r["map_mmhg"], 93.3)
+        self.assertEqual(r["temperature_c"], 37.0)
+        self.assertEqual(r["io_balance_24h_ml"], 500.0)
+        self.assertFalse(r["vasopressor_active"])
+
+    def test_voice_stt_with_persian_commas(self) -> None:
+        r = extract_patient_demographics(
+            "ماتن: اس بی پی، صد و بیست، دی بی پی هفتاد، HR نود، "
+            "دمای سی و هفت درجه، خروجی ادرار پنجاه، I&O مثبت پانصد، "
+            "Vasopressor ندارد."
+        )
+        self.assertEqual(r["sbp_mmhg"], 120.0)
+        self.assertEqual(r["dbp_mmhg"], 70.0)
+        self.assertEqual(r["io_balance_24h_ml"], 500.0)
+        self.assertFalse(r["vasopressor_active"])
+
+    def test_yani_between_label_and_value(self) -> None:
+        r = extract_patient_demographics(
+            "SBP یعنی صد و بیست، DBP یعنی هشتاد، HR یعنی نود، "
+            "دما یعنی سی و هفت درجه، خروجی ادرار پنجاه، "
+            "I&O مثبت پانصد، Vasopressor ندارد."
+        )
+        self.assertEqual(r["sbp_mmhg"], 120.0)
+        self.assertEqual(r["dbp_mmhg"], 80.0)
+        self.assertEqual(r["map_mmhg"], 93.3)
+        self.assertEqual(r["hr_bpm"], 90.0)
+        self.assertEqual(r["temperature_c"], 37.0)
+        self.assertEqual(r["io_balance_24h_ml"], 500.0)
+        self.assertFalse(r["vasopressor_active"])
+
+    def test_fluid_balance_and_dama_from_hyphen_stt(self) -> None:
+        r = extract_patient_demographics(
+            "SBP 120 - DBP 80 - HR 90 - DAMA 37 - خروجی ادرار 50 - "
+            "بالانس مایعات مثبت 500 - Vasopressor ندارد"
+        )
+        self.assertEqual(r["sbp_mmhg"], 120.0)
+        self.assertEqual(r["dbp_mmhg"], 80.0)
+        self.assertEqual(r["hr_bpm"], 90.0)
+        self.assertEqual(r["temperature_c"], 37.0)
+        self.assertEqual(r["urine_output_ml_hr"], 50.0)
+        self.assertEqual(r["io_balance_24h_ml"], 500.0)
+        self.assertFalse(r["vasopressor_active"])
+
+    def test_io_balance_from_exact_whisper_line(self) -> None:
+        r = extract_patient_demographics(
+            "SBP 120- DBP 80- HR 90- DAMA 37 -خروجی ادرار ۵۰، "
+            "بالانس مایعات مثبت ۵۰۰، Vasopressor ندارد."
+        )
+        self.assertEqual(r["io_balance_24h_ml"], 500.0)
+
+    def test_io_balance_spoken_punsad_full_hemo_line(self) -> None:
+        r = extract_patient_demographics(
+            "SBP صد و بیست، DBP هشتاد، HR نود، دما سی و هفت، "
+            "خروجی ادرار پنجاه، بالانس مایعات مثبت پانصد، Vasopressor ندارد."
+        )
+        self.assertEqual(r["sbp_mmhg"], 120.0)
+        self.assertEqual(r["dbp_mmhg"], 80.0)
+        self.assertEqual(r["hr_bpm"], 90.0)
+        self.assertEqual(r["temperature_c"], 37.0)
+        self.assertEqual(r["urine_output_ml_hr"], 50.0)
+        self.assertEqual(r["io_balance_24h_ml"], 500.0)
+        self.assertFalse(r["vasopressor_active"])
+
+    def test_io_balance_zwnj_in_mayeat(self) -> None:
+        r = extract_patient_demographics("بالانس مای\u200cعات مثبت ۵۰۰")
+        self.assertEqual(r["io_balance_24h_ml"], 500.0)
+
+    def test_io_balance_hyphen_before_sign(self) -> None:
+        r = extract_patient_demographics("بالانس مایعات - مثبت 500")
+        self.assertEqual(r["io_balance_24h_ml"], 500.0)
+
 
 if __name__ == "__main__":
     unittest.main()
