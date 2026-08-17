@@ -1,0 +1,8 @@
+{
+  "note": "Copy this shape into assets/audio/dataset/<stamp>.gold.json. Keep only fields that were spoken. Numbers may be int or float.",
+  "transcript": "پتاسیم ممیز نه، پروکلسیتونین ممیز هشت",
+  "gold": {
+    "k": 0.9,
+    "procalcitonin": 0.8
+  }
+}

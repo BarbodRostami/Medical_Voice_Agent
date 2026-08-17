@@ -8,11 +8,12 @@ from __future__ import annotations
 import json
 import os
 import re
+from difflib import SequenceMatcher
 from typing import Any, Literal
 
 Gender = Literal["male", "female"]
 
-EXTRACT_VERSION = "hemo-slot-v12"
+EXTRACT_VERSION = "hemo-slot-v20"
 
 # Persian labels for UI (order matters for display)
 FIELD_LABELS_FA: dict[str, str] = {
@@ -112,6 +113,12 @@ FIELD_LABELS_FA: dict[str, str] = {
     "glucose_mg_dl": "Glucose (mg/dL)",
     "esr_mm_hr": "ESR (mm/hr)",
     "lactate_mmol_l": "Lactate (mmol/L)",
+    # --- Tools / devices tab (additive) ---
+    "cvc_present": "CVC / کاتتر مرکزی",
+    "arterial_line_present": "آرت‌لاین",
+    "ngt_present": "NG / لوله معده",
+    "foley_present": "سوند ادراری",
+    "chest_tube_present": "چست‌تیوب",
 }
 
 # HakimAI Settings-tab mode dropdown values (exact strings for UI mapping)
@@ -132,7 +139,7 @@ _VENT_MODE_PATTERNS: tuple[tuple[str, str], ...] = (
     ("SIMV-V", r"simv[\s\-]?v\b|سیم\s*وی[\s\-]?وی|سیموی\s*حجمی|simv\s*حجمی"),
     ("SIMV-P", r"simv[\s\-]?p\b|سیم\s*وی[\s\-]?پی|سیموی\s*فشاری|simv\s*فشاری"),
     ("PSV/CPAP", r"psv\s*/\s*cpap|\bpsv\b|\bcpap\b|پی\s*اس\s*وی|سی\s*پپ|سیپپ|مود\s*حمایتی"),
-    ("VCV", r"\bvcv\b|وی\s*سی\s*وی|مود\s*حجمی|volume\s*control|کنترل\s*حجمی"),
+    ("VCV", r"\bvcv\b|\bcmv\b|وی\s*سی\s*وی|سی\s*ام\s*وی|مود\s*حجمی|volume\s*control|کنترل\s*حجمی"),
     ("PCV", r"\bpcv\b|پی\s*سی\s*وی|مود\s*فشاری|pressure\s*control|کنترل\s*فشاری"),
 )
 
@@ -160,6 +167,7 @@ _FEMALE = re.compile(
 
 _UNITS: dict[str, int] = {
     "صفر": 0,
+    "صف": 0,  # Whisper often drops the final «ر» in «صفر»
     "یک": 1,
     "دو": 2,
     "سه": 3,
@@ -256,6 +264,17 @@ def normalize_persian_text(text: str) -> str:
         ("حفتاد", "هفتاد"),
         ("حضتاد", "هفتاد"),
         ("سد و", "صد و"),
+        ("صف ممیز", "صفر ممیز"),
+        ("صف و سه", "صفر و سه"),
+        ("سفر ممیز", "صفر ممیز"),
+        ("صقر ممیز", "صفر ممیز"),
+        ("بک ممیز", "یک ممیز"),
+        ("اوتو پیپ", "اتو پیپ"),
+        ("آتو پیپ", "اتو پیپ"),
+        ("اتو پیب", "اتو پیپ"),
+        ("auto pip", "auto peep"),
+        ("ممیز ن ", "ممیز نه "),
+        ("منیزیوم", "منیزیم"),
         # Hemodynamics glued / garbled tokens
         ("صدوبیست", "صد و بیست"),
         ("صدو بیست", "صد و بیست"),
@@ -682,8 +701,8 @@ def _extract_ventilator_mode(text: str) -> str | None:
             return mode
     # Explicit «مود …» catch-all after specific patterns
     m = re.search(
-        r"مود(?:\s*(?:ونتیلاتور|ونتیلاتور|دستگاه))?\s*[:\-]?\s*"
-        r"([A-Za-zآ-ی0-9\s\-/]+?)(?=(?:peep|پیپ|fio2|فی|vt|وی\s*تی|rr|سن|قد|وزن|لوله|$|\.))",
+        r"مودی?(?:\s*(?:ونتیلاتور|ونتیلاتور|دستگاه))?\s*[:\-]?\s*"
+        r"([A-Za-zآ-ی0-9\s\-/]+?)(?=(?:peep|پیپ|fio2|فی|vt|وی\s*تی|rr|پی\s*آی|سن|قد|وزن|لوله|$|\.))",
         text,
         re.I,
     )
@@ -695,6 +714,7 @@ def _extract_ventilator_mode(text: str) -> str | None:
     return None
 
 
+_ZERO_WORDS = frozenset({"صفر", "صف", "سفر", "صقر", "0", "۰"})
 _SIGN_POS = frozenset({"مثبت", "positive", "مصیبت", "+"})
 _SIGN_NEG = frozenset({"منفی", "negative", "-"})
 
@@ -739,7 +759,16 @@ def _parse_tail_number(
             sign = -1.0
             i += 1
             continue
-        is_num = bool(re.fullmatch(r"[+\-]?\d+(?:\.\d+)?", tok)) or tok in _ALL_WORDS
+        is_mmiz = allow_decimal and tok == "ممیز"
+        nxt = tokens[i + 1].strip(".-") if i + 1 < len(tokens) else ""
+        before_mmiz = allow_decimal and nxt == "ممیز"
+        is_num = (
+            bool(re.fullmatch(r"[+\-]?\d+(?:\.\d+)?", tok))
+            or tok in _ALL_WORDS
+            or tok in _ZERO_WORDS
+            or is_mmiz
+            or before_mmiz
+        )
         if not is_num:
             skipped += 1
             if skipped > 6:
@@ -752,8 +781,25 @@ def _parse_tail_number(
         while j < len(tokens) and n_words < 6:
             piece = tokens[j].strip(".-")
             is_decimal_sep = allow_decimal and piece == "ممیز"
-            if piece == "و" or is_decimal_sep or piece in _ALL_WORDS or re.fullmatch(
-                r"[+\-]?\d+(?:\.\d+)?", piece
+            if allow_decimal and not buf and piece == "ممیز":
+                buf.extend(("صفر", "ممیز"))
+                j += 1
+                continue
+            if allow_decimal and not buf and piece in _ZERO_WORDS:
+                buf.append("صفر")
+                j += 1
+                continue
+            if allow_decimal and "ممیز" in buf and piece.startswith("ن"):
+                buf.append("نه")
+                n_words += 1
+                j += 1
+                continue
+            if (
+                piece == "و"
+                or is_decimal_sep
+                or piece in _ALL_WORDS
+                or piece in _ZERO_WORDS
+                or re.fullmatch(r"[+\-]?\d+(?:\.\d+)?", piece)
             ):
                 buf.append(piece)
                 if piece not in ("و", "ممیز"):
@@ -765,6 +811,10 @@ def _parse_tail_number(
             phrase = " ".join(buf[:n]).strip()
             if not phrase:
                 continue
+            # If ممیز was spoken, never fall back to the integer-only prefix
+            # («یک ممیز نه» must not become 1.0 when the fraction token is odd).
+            if "ممیز" in buf and "ممیز" not in phrase:
+                continue
             parsed = _parse_spoken_or_digit(phrase, min_v=0, max_v=mag_max, allow_decimal=allow_decimal)
             if parsed is None:
                 continue
@@ -775,6 +825,40 @@ def _parse_tail_number(
     return None
 
 
+def _fuzzy_label_search(
+    text: str,
+    plain_labels: tuple[str, ...],
+    threshold: float = 0.75,
+) -> int | None:
+    """Fuzzy search for any plain-text label in the transcript.
+
+    Scans the text using a sliding character window equal to each label's length
+    (±2 chars) and returns the end-position of the best match when its
+    similarity ratio is >= threshold.  Only plain Persian/Latin strings should
+    be passed (no regex syntax).
+
+    Returns the character index immediately after the matched span, or None.
+    """
+    best_pos: int | None = None
+    best_ratio: float = 0.0
+
+    for label in plain_labels:
+        label_len = len(label)
+        if label_len < 4:
+            # 2–3 char labels (bun, k, esr) cause too many false positives
+            continue
+        # Slide a window of ±2 chars around the label length
+        for win in range(max(2, label_len - 2), label_len + 3):
+            for start in range(len(text) - win + 1):
+                chunk = text[start : start + win]
+                ratio = SequenceMatcher(None, chunk, label).ratio()
+                if ratio >= threshold and ratio > best_ratio:
+                    best_ratio = ratio
+                    best_pos = start + win
+
+    return best_pos
+
+
 def _number_after_labels(
     text: str,
     labels: tuple[str, ...],
@@ -783,12 +867,18 @@ def _number_after_labels(
     max_v: float,
     as_int: bool = False,
     allow_decimal: bool = False,
+    fuzzy_labels: tuple[str, ...] | None = None,
+    fuzzy_threshold: float = 0.75,
 ) -> float | int | None:
     """Find a numeric (digit or spoken Persian) value after any label.
 
     After the label we scan a short window: filler words are skipped, then the
     next spoken or digit number is taken. This is the shared slot-filler so
     each new Whisper wording does not need its own extractor.
+
+    If regex finds nothing and ``fuzzy_labels`` is provided (plain Persian/Latin
+    strings, no regex syntax), a fuzzy character-window search is tried as a
+    final fallback before returning None.
     """
     label_re = "|".join(labels)
     for m in re.finditer(rf"(?:{label_re})", text, re.I):
@@ -796,6 +886,16 @@ def _number_after_labels(
         val = _parse_tail_number(tail, min_v=min_v, max_v=max_v, as_int=as_int, allow_decimal=allow_decimal)
         if val is not None:
             return val
+
+    # ── Fuzzy fallback ────────────────────────────────────────────────────────
+    if fuzzy_labels:
+        pos = _fuzzy_label_search(text, fuzzy_labels, threshold=fuzzy_threshold)
+        if pos is not None:
+            tail = text[pos : pos + 96]
+            val = _parse_tail_number(tail, min_v=min_v, max_v=max_v, as_int=as_int, allow_decimal=allow_decimal)
+            if val is not None:
+                return val
+
     return None
 
 
@@ -993,7 +1093,11 @@ def _extract_t_lo(text: str) -> float | None:
 def _extract_ti_max(text: str) -> float | None:
     return _number_after_labels(
         text,
-        (r"ti\s*(?:max|مکس)", r"تی\s*آی\s*(?:مکس|max)", r"زمان\s*دم\s*حداکثر"),
+        (
+            r"ti\s*(?:max|مکس|مکرر|مکسر)",
+            r"تی\s*آی\s*(?:مکس|max|مکرر|مکسر)",
+            r"زمان\s*دم\s*حداکثر",
+        ),
         min_v=0.1,
         max_v=10,
         allow_decimal=True,
@@ -1012,7 +1116,7 @@ def _extract_cycle_criteria(text: str) -> float | None:
 def _extract_rise_time(text: str) -> float | None:
     return _number_after_labels(
         text,
-        (r"rise\s*time", r"رایز\s*تایم", r"زمان\s*صعود"),
+        (r"rise\s*time", r"رایز\s*تایم", r"رایزتایم", r"زمان\s*صعود"),
         min_v=0,
         max_v=5,
         allow_decimal=True,
@@ -1184,13 +1288,22 @@ def _extract_auto_peep(text: str) -> float | None:
         text,
         (
             r"auto[\s\-]?peep",
+            r"auto[\s\-]?pip",
             r"intrinsic\s*peep",
             r"اتو\s*پیپ",
+            r"اوتو\s*پیپ",
+            r"آتو\s*پیپ",
+            r"اتو\s*پیب",
             r"اتوپیب",
+            r"اتوپیپ",
+            r"اتو\s*پپ",
             r"پیپ\s*ذاتی",
+            r"اوتو\s*پیب",
         ),
         min_v=0,
         max_v=30,
+        fuzzy_labels=("اتو پیپ", "اوتو پیپ", "auto peep"),
+        fuzzy_threshold=0.80,
     )
 
 
@@ -1651,8 +1764,13 @@ def _parse_spoken_or_digit(
     # Handle explicit decimal point word ممیز: «صفر ممیز سه» → 0.3
     if "ممیز" in phrase:
         left, _, right = phrase.partition("ممیز")
-        whole = persian_spoken_number(left.strip()) or (0 if left.strip() in ("صفر", "0") else None)
-        frac_int = persian_spoken_number(right.strip())
+        whole = persian_spoken_number(left.strip()) or (
+            0 if left.strip() in _ZERO_WORDS or left.strip() == "" else None
+        )
+        right_clean = right.strip()
+        frac_int = persian_spoken_number(right_clean)
+        if frac_int is None and right_clean.startswith("نه"):
+            frac_int = 9
         if whole is not None and frac_int is not None and 0 <= frac_int <= 99:
             val = whole + frac_int / (10 ** len(str(frac_int)))
             if half:
@@ -1830,6 +1948,7 @@ def _extract_hb(text: str) -> float | None:
         ),
         min_v=3.0, max_v=25.0,
         allow_decimal=True,
+        fuzzy_labels=("هموگلوبین", "hemoglobin", "hb"),
     )
 
 
@@ -1839,6 +1958,7 @@ def _extract_hct(text: str) -> float | None:
         (r"\bhct\b", r"hematocrit", r"هماتوکریت", r"هموتوکریت"),
         min_v=5.0, max_v=75.0,
         allow_decimal=True,
+        fuzzy_labels=("هماتوکریت", "hematocrit", "hct"),
     )
 
 
@@ -1870,6 +1990,7 @@ def _extract_na(text: str) -> float | None:
         ),
         min_v=100.0, max_v=185.0,
         allow_decimal=True,
+        fuzzy_labels=("سدیم", "سدیوم", "sodium"),
     )
 
 
@@ -1879,10 +2000,11 @@ def _extract_k(text: str) -> float | None:
         (
             r"\bk\b", r"\bpotassium\b", r"پتاسیم", r"پتاسیوم",
             r"پتاسیمم", r"پطاسیم", r"کا\s*(?=[\d۰-۹])",
-            r"(?<!\w)k(?=\s*[:؛]?\s*[\d۰-۹])",
         ),
         min_v=1.0, max_v=9.0,
         allow_decimal=True,
+        fuzzy_labels=("پتاسیم", "پتاسیوم", "potassium"),
+        fuzzy_threshold=0.85,
     )
 
 
@@ -1898,9 +2020,11 @@ def _extract_ca(text: str) -> float | None:
 def _extract_mg(text: str) -> float | None:
     return _number_after_labels(
         text,
-        (r"\bmg\b", r"\bmagnesium\b", r"منیزیم", r"منیزیوم"),
+        (r"\bmagnesium\b", r"منیزیم", r"منیزیوم", r"منیزیمم", r"ام\s*جی"),
         min_v=0.5, max_v=6.0,
         allow_decimal=True,
+        fuzzy_labels=("منیزیم", "منیزیوم", "magnesium"),
+        fuzzy_threshold=0.82,
     )
 
 
@@ -1910,6 +2034,7 @@ def _extract_phosphate(text: str) -> float | None:
         (r"phosphate", r"phosphorus", r"فسفات", r"فسفر", r"فسفاط", r"فاسفات", r"فسفیت"),
         min_v=0.3, max_v=15.0,
         allow_decimal=True,
+        fuzzy_labels=("فسفات", "فسفر", "phosphate"),
     )
 
 
@@ -1919,6 +2044,8 @@ def _extract_bun(text: str) -> float | None:
         (r"\bbun\b", r"blood\s*urea\s*nitrogen", r"اوره", r"یوریا", r"بی\s*یو\s*ان"),
         min_v=1.0, max_v=500.0,
         allow_decimal=True,
+        fuzzy_labels=("یوریا",),
+        fuzzy_threshold=0.85,
     )
 
 
@@ -1928,6 +2055,7 @@ def _extract_creatinine(text: str) -> float | None:
         (r"creatinine", r"کراتینین", r"کراتنین", r"\bcr\b"),
         min_v=0.2, max_v=30.0,
         allow_decimal=True,
+        fuzzy_labels=("کراتینین", "creatinine"),
     )
 
 
@@ -1977,17 +2105,26 @@ def _extract_crp(text: str) -> float | None:
 def _extract_procalcitonin(text: str) -> float | None:
     return _number_after_labels(
         text,
-        (r"procalcitonin", r"\bpct\b", r"پروکلسیتونین", r"پروکلسیونین", r"پی\s*سی\s*تی"),
+        (
+            r"procalcitonin", r"\bpct\b",
+            r"پروکلسیتونین", r"پروکلسیونین", r"پروکلسیتون",
+            r"پی\s*سی\s*تی",
+        ),
         min_v=0.0, max_v=1000.0,
         allow_decimal=True,
+        fuzzy_labels=("پروکلسیتونین", "procalcitonin"),
+        fuzzy_threshold=0.80,
     )
 
 
 def _extract_glucose(text: str) -> float | None:
     return _number_after_labels(
         text,
-        (r"glucose", r"گلوکز", r"قند\s*خون", r"قند\b", r"بلاد\s*شوگر"),
+        (r"glucose", r"گلوکز", r"قند\s*خون", r"قند\b", r"بلاد\s*شوگر", r"بی\s*اس", r"قندخون"),
         min_v=20.0, max_v=1500.0,
+        allow_decimal=True,
+        fuzzy_labels=("قند خون", "گلوکز", "glucose"),
+        fuzzy_threshold=0.82,
     )
 
 
@@ -1998,6 +2135,7 @@ def _extract_esr(text: str) -> float | None:
             r"\besr\b", r"\besrc\b", r"\besc\b",
             r"erythrocyte\s*sedimentation", r"رسوب\s*خون",
             r"ای\s*اس\s*آر", r"ای\s*اس\s*ار", r"ا\s*س\s*ر\b",
+            r"ایسار", r"ای\s*اس\s*ا\b", r"(?<![A-Za-z])esr(?![A-Za-z])",
             r"سرعت\s*رسوب",
         ),
         min_v=0.0, max_v=200.0,
@@ -2013,10 +2151,46 @@ def _extract_lactate(text: str) -> float | None:
         ),
         min_v=0.1, max_v=30.0,
         allow_decimal=True,
+        fuzzy_labels=("لاکتات", "لاکتیک", "lactate"),
     )
 
 
 # ── End Lab extractors ─────────────────────────────────────────────────────────
+
+
+def _extract_cvc(text: str) -> bool | None:
+    return _extract_bool_flag(
+        text,
+        (r"\bcvc\b", r"کاتتر\s*مرکزی", r"سنترال\s*لاین", r"سی\s*وی\s*سی"),
+    )
+
+
+def _extract_arterial_line(text: str) -> bool | None:
+    return _extract_bool_flag(
+        text,
+        (r"arterial\s*line", r"آرت[\s\-]?لاین", r"ارت[\s\-]?لاین", r"لاین\s*شریانی"),
+    )
+
+
+def _extract_ngt(text: str) -> bool | None:
+    return _extract_bool_flag(
+        text,
+        (r"\bngt?\b", r"ان\s*جی", r"لوله\s*معده", r"نازوگاستریک"),
+    )
+
+
+def _extract_foley(text: str) -> bool | None:
+    return _extract_bool_flag(
+        text,
+        (r"foley", r"فولی", r"سوند\s*ادرار", r"سوند\s*فولی"),
+    )
+
+
+def _extract_chest_tube(text: str) -> bool | None:
+    return _extract_bool_flag(
+        text,
+        (r"chest\s*tube", r"چست[\s\-]?تیوب", r"chest[\s\-]?tube", r"لوله\s*قفسه"),
+    )
 
 
 def _extract_after_keyword(text: str, keywords: tuple[str, ...], max_len: int = 120) -> str | None:
@@ -2040,7 +2214,17 @@ def format_field_value(key: str, value: Any) -> str:
         return "—"
     if key == "gender":
         return "مرد" if value == "male" else "زن" if value == "female" else str(value)
-    if key in ("sedation_active", "recent_surgery", "fever", "vasopressor_active"):
+    if key in (
+        "sedation_active",
+        "recent_surgery",
+        "fever",
+        "vasopressor_active",
+        "cvc_present",
+        "arterial_line_present",
+        "ngt_present",
+        "foley_present",
+        "chest_tube_present",
+    ):
         return "بله" if value else "خیر"
     if key == "tube_type":
         return "ETT (دهان)" if value == "ETT" else "Trach (تراکئوستومی)" if value == "Trach" else str(value)
@@ -2364,7 +2548,36 @@ def _llm_call(transcript: str) -> dict[str, Any] | None:
         return None
 
 
-def _apply_llm_data(data: dict[str, Any], fields: dict[str, Any], *, only_missing: bool) -> None:
+_LAB_FALLBACK_FIELDS: frozenset[str] = frozenset({
+    "hb_gdl", "hct_pct", "wbc_k_ul", "platelets_k_ul",
+    "na_meq_l", "k_meq_l", "ca_mg_dl", "mg_mg_dl", "phosphate_mg_dl",
+    "bun_mg_dl", "creatinine_mg_dl", "albumin_g_dl",
+    "ast_u_l", "alt_u_l", "bilirubin_mg_dl", "crp_mg_l",
+    "procalcitonin_ng_ml", "glucose_mg_dl", "esr_mm_hr", "lactate_mmol_l",
+})
+_MEAS_FALLBACK_FIELDS: frozenset[str] = frozenset({
+    "rr_total_bpm", "rr_spontaneous_bpm", "rsbi", "rcexp_sec", "wob_jl",
+})
+_LAB_HINT_RE = re.compile(
+    r"هموگلوبین|هماتوکریت|گلبول|پلاکت|سدیم|پتاسیم|کلسیم|منیزیم|فسفات|فسفر|"
+    r"اوره|\bbun\b|کراتینین|آلبومین|\bast\b|\balt\b|بیلیروبین|\bcrp\b|"
+    r"پروکلسیتونین|گلوکز|قند\s*خون|\besr\b|ای\s*اس\s*آر|لاکتات|آزمایش",
+    re.I,
+)
+_MEAS_HINT_RE = re.compile(
+    r"توتال|اسپانت|rsbi|rcexp|آر\s*سی\s*اکسپ|پلاتو|پیک\s*پرشر|"
+    r"اندازه[\s\-]?گیری|وی\s*تی\s*ای|\bvte\b|لیک|کمپل\S*انس|\bwob\b",
+    re.I,
+)
+
+
+def _apply_llm_data(
+    data: dict[str, Any],
+    fields: dict[str, Any],
+    *,
+    only_missing: bool,
+    transcript: str = "",
+) -> None:
     """Merge validated LLM output into fields dict.
 
     When only_missing=True, existing non-None values are kept (fallback mode).
@@ -2372,9 +2585,18 @@ def _apply_llm_data(data: dict[str, Any], fields: dict[str, Any], *, only_missin
     LLM nulls clear regex false-positives for covered fields.
     Fallback fields (_LLM_FALLBACK_FIELDS) always use only_missing=True regardless
     of the caller's only_missing setting, so regex is never overwritten for them.
+
+    Lab / measurement fallback keys are skipped unless the transcript actually
+    mentions that section — otherwise LLM invents K/BUN/RCexp from vent numbers.
     """
+    allow_lab = bool(_LAB_HINT_RE.search(transcript or ""))
+    allow_meas = bool(_MEAS_HINT_RE.search(transcript or ""))
     all_keys = list(_LLM_HEMO_FIELDS) + list(_LLM_FALLBACK_FIELDS)
     for key in all_keys:
+        if key in _LAB_FALLBACK_FIELDS and not allow_lab:
+            continue
+        if key in _MEAS_FALLBACK_FIELDS and not allow_meas:
+            continue
         effective_only_missing = only_missing or (key in _LLM_FALLBACK_FIELDS)
         if effective_only_missing and fields.get(key) is not None:
             continue
@@ -2416,7 +2638,7 @@ def _llm_hemo_fallback(transcript: str, fields: dict[str, Any]) -> None:
     if data is None:
         return
     # Primary mode: LLM is authoritative; regex values kept only where LLM is null
-    _apply_llm_data(data, fields, only_missing=False)
+    _apply_llm_data(data, fields, only_missing=False, transcript=transcript)
 
 
 def extract_patient_demographics(transcript: str) -> dict[str, Any]:
@@ -2542,27 +2764,40 @@ def extract_patient_demographics(transcript: str) -> dict[str, Any]:
     io_balance_24h_ml = _extract_io_balance_24h(text)
     vasopressor_active = _extract_vasopressor(text)
 
-    # Lab tab
-    hb_gdl = _extract_hb(text)
-    hct_pct = _extract_hct(text)
-    wbc_k_ul = _extract_wbc(text)
-    platelets_k_ul = _extract_platelets(text)
-    na_meq_l = _extract_na(text)
-    k_meq_l = _extract_k(text)
-    ca_mg_dl = _extract_ca(text)
-    mg_mg_dl = _extract_mg(text)
-    phosphate_mg_dl = _extract_phosphate(text)
-    bun_mg_dl = _extract_bun(text)
-    creatinine_mg_dl = _extract_creatinine(text)
-    albumin_g_dl = _extract_albumin(text)
-    ast_u_l = _extract_ast(text)
-    alt_u_l = _extract_alt(text)
-    bilirubin_mg_dl = _extract_bilirubin(text)
-    crp_mg_l = _extract_crp(text)
-    procalcitonin_ng_ml = _extract_procalcitonin(text)
-    glucose_mg_dl = _extract_glucose(text)
-    esr_mm_hr = _extract_esr(text)
-    lactate_mmol_l = _extract_lactate(text)
+    # Lab tab — skip unless the transcript actually mentions labs
+    if _LAB_HINT_RE.search(text):
+        hb_gdl = _extract_hb(text)
+        hct_pct = _extract_hct(text)
+        wbc_k_ul = _extract_wbc(text)
+        platelets_k_ul = _extract_platelets(text)
+        na_meq_l = _extract_na(text)
+        k_meq_l = _extract_k(text)
+        ca_mg_dl = _extract_ca(text)
+        mg_mg_dl = _extract_mg(text)
+        phosphate_mg_dl = _extract_phosphate(text)
+        bun_mg_dl = _extract_bun(text)
+        creatinine_mg_dl = _extract_creatinine(text)
+        albumin_g_dl = _extract_albumin(text)
+        ast_u_l = _extract_ast(text)
+        alt_u_l = _extract_alt(text)
+        bilirubin_mg_dl = _extract_bilirubin(text)
+        crp_mg_l = _extract_crp(text)
+        procalcitonin_ng_ml = _extract_procalcitonin(text)
+        glucose_mg_dl = _extract_glucose(text)
+        esr_mm_hr = _extract_esr(text)
+        lactate_mmol_l = _extract_lactate(text)
+    else:
+        hb_gdl = hct_pct = wbc_k_ul = platelets_k_ul = None
+        na_meq_l = k_meq_l = ca_mg_dl = mg_mg_dl = phosphate_mg_dl = None
+        bun_mg_dl = creatinine_mg_dl = albumin_g_dl = None
+        ast_u_l = alt_u_l = bilirubin_mg_dl = crp_mg_l = None
+        procalcitonin_ng_ml = glucose_mg_dl = esr_mm_hr = lactate_mmol_l = None
+
+    cvc_present = _extract_cvc(text)
+    arterial_line_present = _extract_arterial_line(text)
+    ngt_present = _extract_ngt(text)
+    foley_present = _extract_foley(text)
+    chest_tube_present = _extract_chest_tube(text)
 
     fields: dict[str, Any] = {
         "gender": gender,
@@ -2655,6 +2890,11 @@ def extract_patient_demographics(transcript: str) -> dict[str, Any]:
         "glucose_mg_dl": glucose_mg_dl,
         "esr_mm_hr": esr_mm_hr,
         "lactate_mmol_l": lactate_mmol_l,
+        "cvc_present": cvc_present,
+        "arterial_line_present": arterial_line_present,
+        "ngt_present": ngt_present,
+        "foley_present": foley_present,
+        "chest_tube_present": chest_tube_present,
     }
     _fill_nulls_second_pass(text, fields)
     if fields.get("map_mmhg") is None:
@@ -2781,6 +3021,11 @@ def confirmation_speech_fa(result: dict[str, Any], *, max_items: int = 6) -> str
         "rr_set_bpm",
         "ventilator_days",
         "tube_type",
+        "cvc_present",
+        "arterial_line_present",
+        "ngt_present",
+        "foley_present",
+        "chest_tube_present",
         "indication",
         "rass",
         "diagnosis_category",

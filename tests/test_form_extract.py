@@ -426,6 +426,93 @@ class FormExtractTests(unittest.TestCase):
         r = extract_patient_demographics("بالانس مایعات - مثبت 500")
         self.assertEqual(r["io_balance_24h_ml"], 500.0)
 
+    def test_vent_settings_from_whisper_garbled_line(self) -> None:
+        r = extract_patient_demographics(
+            "مودی سی ام وی، پی آی هجده، پیپ پنج، فی او دو چهل درصد، "
+            "آر آر ست چهارده، رایز تایم صفر ممیز سه، تی آی مکرر یک ممیز پنج"
+        )
+        self.assertEqual(r["ventilator_mode"], "VCV")
+        self.assertEqual(r["pi_cmh2o"], 18.0)
+        self.assertEqual(r["peep_cmh2o"], 5.0)
+        self.assertEqual(r["fio2_pct"], 40.0)
+        self.assertEqual(r["rr_set_bpm"], 14)
+        self.assertEqual(r["rise_time_sec"], 0.3)
+        self.assertEqual(r["ti_max_sec"], 1.5)
+        self.assertIsNone(r["rr_total_bpm"])
+        self.assertIsNone(r["rcexp_sec"])
+        self.assertIsNone(r["k_meq_l"])
+        self.assertIsNone(r["bun_mg_dl"])
+
+    def test_rise_time_saf_mmiz_stt(self) -> None:
+        r = extract_patient_demographics(
+            "مودی پی سی وی رایز تایم صف ممیز سه تی آی مکرر بک ممیز پنج"
+        )
+        self.assertEqual(r["ventilator_mode"], "PCV")
+        self.assertEqual(r["rise_time_sec"], 0.3)
+        self.assertEqual(r["ti_max_sec"], 1.5)
+        self.assertIsNone(r["k_meq_l"])
+        self.assertIsNone(r["bun_mg_dl"])
+
+    def test_icu_tools_devices(self) -> None:
+        r = extract_patient_demographics(
+            "سی وی سی دارد، آرت‌لاین دارد، ان جی دارد، سوند فولی دارد، چست‌تیوب ندارد"
+        )
+        self.assertTrue(r["cvc_present"])
+        self.assertTrue(r["arterial_line_present"])
+        self.assertTrue(r["ngt_present"])
+        self.assertTrue(r["foley_present"])
+        self.assertFalse(r["chest_tube_present"])
+
+    def test_auto_peep_spoken_variants(self) -> None:
+        for line in (
+            "اتو پیپ دو",
+            "اوتو پیپ دو",
+            "اتوپیب دو",
+            "auto pip 2",
+            "پیک پرشر ۲۸ پلاتو ۲۲ پیپ اندازه گیری پنج اتو پیپ دو لیک سه",
+        ):
+            r = extract_patient_demographics(line)
+            self.assertEqual(r["auto_peep_cmh2o"], 2.0, msg=line)
+
+    def test_lab_mg_one_point_nine(self) -> None:
+        r = extract_patient_demographics("منیزیم یک ممیز نه فسفات سه")
+        self.assertEqual(r["mg_mg_dl"], 1.9)
+        self.assertEqual(r["phosphate_mg_dl"], 3.0)
+
+    def test_lab_mg_mmiz_truncated_neh(self) -> None:
+        r = extract_patient_demographics("منیزیم یک ممیز ن فسفات سه")
+        self.assertEqual(r["mg_mg_dl"], 1.9)
+
+    def test_full_lab_spoken_line(self) -> None:
+        r = extract_patient_demographics(
+            "هموگلوبین ده ممیز پنج هماتوکریت سی و دو گلبول سفید دوازده "
+            "پلاکت صد و هشتاد سدیم صد و چهل پتاسیم سه ممیز هشت کلسیم هشت ممیز دو "
+            "منیزیم یک ممیز نه فسفات سه اوره سی و پنج کراتینین یک ممیز یک "
+            "آلبومین سه ممیز دو آ اس تی چهل و پنج آ ال تی سی و هشت "
+            "بیلیروبین یک ممیز سه سی آر پی پانزده پروکلسیتونین صفر ممیز هشت "
+            "قند خون صد و ده ای اس آر بیست و دو لاکتات یک ممیز شش"
+        )
+        self.assertEqual(r["mg_mg_dl"], 1.9)
+        self.assertEqual(r["esr_mm_hr"], 22.0)
+        self.assertEqual(r["lactate_mmol_l"], 1.6)
+        self.assertEqual(r["procalcitonin_ng_ml"], 0.8)
+        self.assertEqual(r["glucose_mg_dl"], 110.0)
+
+    def test_procalcitonin_zero_point_eight_variants(self) -> None:
+        for line in (
+            "پروکلسیتونین صفر ممیز هشت",
+            "پروکلسیتونین ممیز هشت",
+            "پروکلسیتونین سفر ممیز هشت",
+            "پروکلسیتونین صف ممیز هشت",
+        ):
+            r = extract_patient_demographics(line)
+            self.assertEqual(r["procalcitonin_ng_ml"], 0.8, msg=line)
+
+    def test_pcv_mode_still_maps(self) -> None:
+        r = extract_patient_demographics("مود پی سی وی پی آی ۱۸")
+        self.assertEqual(r["ventilator_mode"], "PCV")
+        self.assertEqual(r["pi_cmh2o"], 18.0)
+
 
 if __name__ == "__main__":
     unittest.main()

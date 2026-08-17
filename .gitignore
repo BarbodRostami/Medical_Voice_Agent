@@ -16,6 +16,7 @@ db.sqlite3
 *.onnx
 *.json
 !postman/*.json
+!backend/experiments/gold_template.json
 *.mp3
 *.wav
 *.zip
@@ -25,6 +26,8 @@ archive/
 assets/data/*.pdf
 assets/audio/scratch/*
 !assets/audio/scratch/.gitkeep
+assets/audio/dataset/*
+!assets/audio/dataset/.gitkeep
 
 # Local / IDE (do not publish)
 .env

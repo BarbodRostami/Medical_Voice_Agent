@@ -101,6 +101,14 @@ SAMPLE_SCRIPT_HEMO = (
     "وازوپرسور ندارد."
 )
 
+SAMPLE_SCRIPT_TOOLS = (
+    "سی وی سی دارد. "
+    "آرت‌لاین دارد. "
+    "ان جی دارد. "
+    "سوند فولی دارد. "
+    "چست‌تیوب ندارد."
+)
+
 _PATIENT_KEYS = (
     "gender",
     "age",
@@ -204,7 +212,25 @@ _LAB_KEYS = (
     "lactate_mmol_l",
 )
 
-_BOOL_KEYS = ("sedation_active", "recent_surgery", "fever", "vasopressor_active")
+_TOOL_KEYS = (
+    "cvc_present",
+    "arterial_line_present",
+    "ngt_present",
+    "foley_present",
+    "chest_tube_present",
+)
+
+_BOOL_KEYS = (
+    "sedation_active",
+    "recent_surgery",
+    "fever",
+    "vasopressor_active",
+    "cvc_present",
+    "arterial_line_present",
+    "ngt_present",
+    "foley_present",
+    "chest_tube_present",
+)
 _INT_KEYS = ("age", "height_cm", "rass", "vt_set_ml", "rr_set_bpm")
 _FLOAT_KEYS = (
     "weight_kg",
@@ -459,7 +485,22 @@ def _process_audio(
     append: bool,
 ) -> None:
     digest = hashlib.sha256(audio_bytes).hexdigest()
-    if digest == st.session_state["last_audio_hash"] or len(audio_bytes) <= 200:
+    if digest == st.session_state["last_audio_hash"] and len(audio_bytes) > 200:
+        # Same file again: re-parse stored transcript with latest extractors (no new STT).
+        prev = st.session_state.get("result") or {}
+        text = (prev.get("raw_text") or "").strip()
+        if text:
+            importlib.reload(_form_extract)
+            from backend.experiments.form_extract import extract_patient_demographics as extract_now
+
+            parsed = extract_now(text)
+            parsed["raw_text"] = text
+            st.session_state["result"] = parsed
+            st.session_state["phase"] = "result"
+            st.session_state["error"] = ""
+            st.rerun()
+        return
+    if len(audio_bytes) <= 200:
         return
     st.session_state["last_audio_hash"] = digest
     st.session_state["phase"] = "processing"
@@ -556,7 +597,7 @@ def _clipboard_button(payload: str, *, label: str = "کپی JSON") -> None:
 def _render_sample_script() -> None:
     mode = st.radio(
         "متن نمونه",
-        ("همودینامیک", "ABG", "اندازه‌گیری", "تنظیمات ونتیلاتور"),
+        ("همودینامیک", "ABG", "اندازه‌گیری", "تنظیمات ونتیلاتور", "ابزارها"),
         horizontal=True,
         label_visibility="collapsed",
         key="sample_mode",
@@ -570,6 +611,9 @@ def _render_sample_script() -> None:
     elif mode == "همودینامیک":
         script = SAMPLE_SCRIPT_HEMO
         title = "متن نمونه — همودینامیک (بلند بخوانید؛ MAP از SBP/DBP)"
+    elif mode == "ابزارها":
+        script = SAMPLE_SCRIPT_TOOLS
+        title = "متن نمونه — ابزارها (بلند بخوانید)"
     else:
         script = SAMPLE_SCRIPT_VENT
         title = "متن نمونه — تنظیمات ونتیلاتور (بلند بخوانید)"
@@ -640,6 +684,10 @@ def _render_hemo_form(r: dict[str, Any] | None) -> None:
 
 def _render_lab_form(r: dict[str, Any] | None) -> None:
     _render_field_panel(r, keys=_LAB_KEYS, title="آزمایشگاه")
+
+
+def _render_tools_form(r: dict[str, Any] | None) -> None:
+    _render_field_panel(r, keys=_TOOL_KEYS, title="ابزارها")
 
 
 def _render_mic_upload(*, append: bool, key_suffix: str) -> None:
@@ -980,6 +1028,7 @@ def _render_result(r: dict[str, Any]) -> None:
     _render_vent_settings_form(r)
     _render_measure_form(r)
     _render_lab_form(r)
+    _render_tools_form(r)
 
     patient_rows = _rows_for_keys(r, _PATIENT_KEYS)
     transcript_html = (
@@ -1107,6 +1156,7 @@ elif phase == "append":
     _render_vent_settings_form(st.session_state.get("result"))
     _render_measure_form(st.session_state.get("result"))
     _render_lab_form(st.session_state.get("result"))
+    _render_tools_form(st.session_state.get("result"))
     st.markdown(
         '<p class="listening-hint">ادامه بدهید — فیلدهای قبلی نگه داشته می‌شوند</p>',
         unsafe_allow_html=True,
@@ -1131,6 +1181,8 @@ else:
     _render_abg_form(st.session_state.get("result"))
     _render_vent_settings_form(st.session_state.get("result"))
     _render_measure_form(st.session_state.get("result"))
+    _render_lab_form(st.session_state.get("result"))
+    _render_tools_form(st.session_state.get("result"))
     _render_mic_upload(append=False, key_suffix="main")
     if st.session_state.get("error"):
         st.error(st.session_state["error"])

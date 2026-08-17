@@ -14,6 +14,9 @@
 > Creatinine, Albumin, AST, ALT, Bilirubin, CRP, Procalcitonin, Glucose, ESR, Lactate)  
 > extracted from a single Persian voice recording — no manual typing required.
 
+Voice samples from the experiment UI are saved under `assets/audio/dataset/`
+(audio + JSON sidecar, gitignored). Turn off with `VOICE_FORM_SAVE_SAMPLES=0`.
+
 ---
 
 ## What it does
@@ -76,6 +79,9 @@ Streamlit UI  ──── editable form card + TTS confirmation
 |------|------|
 | `form_extract.py` | Field extractors, LLM integration, merge logic |
 | `voice_form_ui.py` | Streamlit UI |
+| `eval_voice_form.py` | Score saved samples against gold labels |
+| `voice_eval_ui.py` | Streamlit gold/eval page (port 8610) |
+| `gold_template.json` | Example gold-label schema |
 | `../../backend/stt_utils.py` | Whisper wrapper, STT garble fixes, domain prompt |
 | `../../tests/test_form_extract.py` | Unit tests for extractors |
 
@@ -118,18 +124,34 @@ $env:OPENAI_API_KEY = "sk-..."
 
 ---
 
-## Tests
+## Evaluation (gold labels)
+
+Extractor output is not accuracy. Label ~20 clips, then re-run after parser changes.
+
+1. Record samples in the experiment UI (`assets/audio/dataset/*.json`, gitignored).
+2. Create gold stubs (pre-filled from extractor — **edit** them):
 
 ```powershell
-cd D:\Python_envs\rag_project
-.\venv\Scripts\python.exe -m pytest tests/test_form_extract.py -v
+.\venv\Scripts\python.exe -m backend.experiments.eval_voice_form --init-gold
 ```
+
+3. In each `*.gold.json`, keep only fields that were actually spoken.
+4. Score:
+
+```powershell
+.\scripts\eval_voice_form.ps1
+# or
+.\venv\Scripts\python.exe -m unittest tests.test_eval_voice_form tests.test_form_extract
+```
+
+Metrics: field accuracy, wrong value, miss (said but empty), extra (filled but not in gold).
+Computed fields (MAP, P/F, driving pressure, VT/IBW) are skipped.
 
 ---
 
 ## Version
 
-Current extractor version: `hemo-slot-v12`
+Current extractor version: `hemo-slot-v20`
 
 > Each version increment reflects a breaking change to extraction logic.
 > Store this version alongside saved JSON to detect schema drift.

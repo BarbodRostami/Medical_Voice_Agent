@@ -1367,6 +1367,7 @@ async def experiment_voice_form_stt(file: UploadFile = File(...)):
     Uses a demographics-biased Whisper prompt, then extracts gender/age/height.
     """
     from backend.experiments.form_extract import extract_patient_demographics
+    from backend.experiments.voice_dataset import save_voice_form_sample
 
     raw = await file.read()
     if not raw:
@@ -1389,6 +1390,7 @@ async def experiment_voice_form_stt(file: UploadFile = File(...)):
             pass
     # Soft empty: UI asks user to speak again (avoid scary 422 in the browser).
     fields = extract_patient_demographics(transcript or "")
+    save_voice_form_sample(raw, suffix, transcript or "", fields)
     return {
         "transcript": transcript or "",
         "fields": fields,
